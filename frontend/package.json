@@ -1,0 +1,12 @@
+{
+  "name": "trans-eterazama-frontend",
+  "version": "1.0.0",
+  "description": "Cliente Web Trans Eterazama",
+  "main": "index.html",
+  "scripts": {
+    "start": "serve -l 5500"
+  },
+  "dependencies": {
+    "serve": "^14.2.3"
+  }
+}
