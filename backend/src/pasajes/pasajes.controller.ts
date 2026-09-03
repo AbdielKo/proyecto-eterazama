@@ -1,8 +1,13 @@
-import { Controller, Get, Post, Body, Param, Res } from '@nestjs/common';
-import type { Response } from 'express';
+import { Controller, Get, Post, UseGuards, Body, Param, Req, Res } from '@nestjs/common';
+import type { Request, Response } from 'express';
 import { PasajesService } from './pasajes.service';
 import { RegistrarVentaDto } from './dto/registrar-venta.dto';
+import { SolicitarCancelacionDto } from './dto/solicitar-cancelacion.dto';
 import { PdfService } from './pdf.service';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RolesGuard } from '../auth/roles.guard';
+import { Roles } from '../auth/roles.decorator';
+import { ROLES } from '../auth/roles';
 
 @Controller('pasajes')
 export class PasajesController {
@@ -21,6 +26,18 @@ export class PasajesController {
     return this.pasajesService.obtenerHistorial();
   }
 
+  // El usuario solicita cancelar su pasaje (queda PENDIENTE). No libera asiento.
+  @Post(':id/cancelar')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(ROLES.USUARIO)
+  solicitarCancelacion(
+    @Param('id') id: string,
+    @Body() body: SolicitarCancelacionDto,
+    @Req() _req: Request,
+  ) {
+    return this.pasajesService.solicitarCancelacion(id, body?.motivo);
+  }
+
   @Get('hoy')
   obtenerVentasDelDia() {
     return this.pasajesService.obtenerVentasDelDia();
@@ -31,7 +48,7 @@ export class PasajesController {
     return this.pasajesService.obtenerPorPlaca(placa);
   }
 
-  @Get('caja')
+  @Get('cierre-caja')
   obtenerCierreCaja() {
     return this.pasajesService.obtenerCierreCaja();
   }

@@ -4,11 +4,14 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { FlotaModule } from './flota/flota.module';
 import { PasajesModule } from './pasajes/pasajes.module';
 import { AuthModule } from './auth/auth.module';
+import { ReviewModule } from './reviews/review.module';
+import { ChoferModule } from './chofer/chofer.module';
+import { SecretariaModule } from './secretaria/secretaria.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
-      isGlobal: true, // Hace que las variables .env estén disponibles en todo el proyecto
+      isGlobal: true,
     }),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
@@ -27,6 +30,9 @@ import { AuthModule } from './auth/auth.module';
     FlotaModule,
     PasajesModule,
     AuthModule,
+    ReviewModule,
+    ChoferModule,
+    SecretariaModule,
   ],
 })
 export class AppModule {}

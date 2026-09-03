@@ -1,0 +1,31 @@
+# Dependencias
+node_modules/
+
+# Variables de entorno
+.env
+.env.local
+.env.development
+.env.production
+
+# Logs
+*.log
+npm-debug.log*
+
+# Build
+dist/
+build/
+
+# NestJS
+coverage/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+
+# Archivos temporales
+*.tmp
+*.temp

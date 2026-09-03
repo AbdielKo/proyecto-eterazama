@@ -28,4 +28,7 @@ export class CrearVehiculoDto {
   @IsOptional()
   @IsNumber()
   puestoFila?: number;
+
+  @IsNumber()
+  capacidadTotal: number;
 }

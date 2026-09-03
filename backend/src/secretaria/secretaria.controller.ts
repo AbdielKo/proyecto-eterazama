@@ -1,0 +1,134 @@
+import {
+  Controller,
+  Get,
+  Post,
+  Put,
+  Body,
+  Query,
+  Param,
+  UseGuards,
+  Req,
+} from '@nestjs/common';
+import type { Request } from 'express';
+
+import { SecretariaService } from './secretaria.service';
+
+import { VentaBoleteriaDto } from './dto/vender-boleteria.dto';
+import { ActualizarConfiguracionDto } from './dto/actualizar-configuracion.dto';
+import { ConfirmarReembolsoDto } from './dto/confirmar-reembolso.dto';
+
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RolesGuard } from '../auth/roles.guard';
+import { Roles } from '../auth/roles.decorator';
+import { ROLES } from '../auth/roles';
+
+@Controller('secretaria')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(ROLES.SECRETARIA)
+export class SecretariaController {
+  constructor(
+    private readonly secretariaService: SecretariaService,
+  ) {}
+
+  // Nómina de choferes (datos reales desde PostgreSQL)
+  @Get('nomina')
+  obtenerNomina() {
+    return this.secretariaService.obtenerNomina();
+  }
+
+  // Historial de ventas con filtros (día/semana/mes/chofer/vehículo)
+  @Get('ventas')
+  obtenerVentas(
+    @Query('periodo') periodo?: string,
+    @Query('choferId') choferId?: string,
+    @Query('placa') placa?: string,
+  ) {
+    return this.secretariaService.obtenerVentas({
+      periodo,
+      choferId,
+      placa,
+    });
+  }
+
+  // Caja central (totales reales)
+  @Get('caja')
+  obtenerCaja() {
+    return this.secretariaService.obtenerCaja();
+  }
+
+  // Reembolsos: solicitudes pendientes y pasajes ya reembolsados
+  @Get('reembolsos')
+  obtenerReembolsos() {
+    return this.secretariaService.obtenerReembolsos();
+  }
+
+  // La Secretaría confirma manualmente que devolvió el dinero:
+  // libera el asiento y marca el pasaje como reembolsado (transacción).
+  @Post('reembolsos/:id/confirmar')
+  confirmarReembolso(
+    @Param('id') id: string,
+    @Body() body: ConfirmarReembolsoDto,
+    @Req() req: Request,
+  ) {
+    const secretaria =
+      (req.user as { username?: string } | undefined)?.username ||
+      'Secretaria';
+    return this.secretariaService.confirmarReembolso(
+      id,
+      body.motivo,
+      secretaria,
+    );
+  }
+
+  // Reseñas y calificaciones de un chofer
+  @Get('resenas/:choferId')
+  obtenerResenas(@Param('choferId') choferId: string) {
+    return this.secretariaService.obtenerResenas(choferId);
+  }
+
+  // Gráficas de calificaciones de un chofer (día/semana/mes)
+  @Get('graficas/:choferId')
+  obtenerGraficas(
+    @Param('choferId') choferId: string,
+    @Query('periodo') periodo?: string,
+  ) {
+    return this.secretariaService.obtenerGraficas(
+      choferId,
+      periodo || 'mes',
+    );
+  }
+
+  // =============================================================
+  // BOLETERÍA DE SECRETARÍA
+  // =============================================================
+
+  // Configuración del sindicato (fuente de verdad de los precios)
+  @Get('configuracion')
+  obtenerConfiguracion() {
+    return this.secretariaService.obtenerConfiguracion();
+  }
+
+  // Guardar configuración (precios oficiales de pasajes)
+  @Put('configuracion')
+  actualizarConfiguracion(@Body() body: ActualizarConfiguracionDto) {
+    return this.secretariaService.actualizarConfiguracion(body);
+  }
+
+  // Paradas principales (Cochabamba / Eterazama) con sus vehículos reales
+  @Get('boleteria/paradas')
+  obtenerBoleteriaParadas() {
+    return this.secretariaService.obtenerBoleteriaParadas();
+  }
+
+  // Detalle de un vehículo para la selección de asientos
+  @Get('boleteria/vehiculo/:id')
+  obtenerVehiculoBoleteria(@Param('id') id: number) {
+    return this.secretariaService.obtenerVehiculoParaBoleteria(id);
+  }
+
+  // Venta en ventanilla (pago en efectivo). Valida disponibilidad en backend.
+  @Post('boleteria/venta')
+  venderBoleteria(@Body() body: VentaBoleteriaDto) {
+    return this.secretariaService.venderBoleteria(body);
+  }
+}

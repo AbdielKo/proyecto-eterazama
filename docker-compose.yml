@@ -1,16 +1,17 @@
-version: '3.8'
-
 services:
   postgres-db:
     image: postgres:15-alpine
     container_name: trans_eterazama_db
     restart: always
+
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: secretpassword
       POSTGRES_DB: trans_eterazama
+
     ports:
-      - "5432:5432"
+      - "5433:5432"
+
     volumes:
       - postgres_data:/var/lib/postgresql/data
 

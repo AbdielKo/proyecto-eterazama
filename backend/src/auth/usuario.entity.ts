@@ -1,33 +1,80 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+} from 'typeorm';
+
+import { ROLES } from './roles';
 
 @Entity('usuarios')
 export class Usuario {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ unique: true })
+  @Column({
+    type: 'varchar',
+    unique: true,
+  })
   nombreUsuario: string;
 
-  @Column({ nullable: true })
-  nombre: string;
+  @Column({
+    type: 'varchar',
+    nullable: true,
+  })
+  nombre: string | null;
 
-  @Column({ nullable: true })
-  apellidos: string;
+  @Column({
+    type: 'varchar',
+    nullable: true,
+  })
+  apellidos: string | null;
 
-  @Column({ unique: true, nullable: true })
-  gmail: string;
+  @Column({
+    type: 'varchar',
+    unique: true,
+    nullable: true,
+  })
+  gmail: string | null;
 
-  @Column({ unique: true, nullable: true })
-  telefono: string;
+  @Column({
+    type: 'varchar',
+    unique: true,
+    nullable: true,
+  })
+  telefono: string | null;
 
-  @Column({ select: false, nullable: true })
-  passwordHash: string;
+  @Column({
+    type: 'varchar',
+    unique: true,
+    nullable: true,
+  })
+  ci: string | null;
 
-  @Column({ default: 'pasajero' })
-  rol: string; // 'pasajero', 'chofer', 'secretaria'
+  @Column({
+    type: 'varchar',
+    default: 'activo',
+  })
+  estado: string;
 
-  @Column({ nullable: true })
-  placaAsignada: string;
+  @Column({
+    type: 'varchar',
+    select: false,
+    nullable: true,
+  })
+  passwordHash: string | null;
+
+  @Column({
+    type: 'varchar',
+    default: ROLES.USUARIO,
+  })
+  rol: string;
+
+  @Column({
+    type: 'varchar',
+    nullable: true,
+  })
+  placaAsignada: string | null;
 
   @CreateDateColumn()
   fechaRegistro: Date;
