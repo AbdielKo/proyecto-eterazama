@@ -20,6 +20,9 @@ export interface Pasaje {
   fechaCreacion?: string;
   estado?: string;
   codigo?: string;
+  codigoBarras?: string | null;
+  estadoBoleto?: string;
+  escaneadoPor?: string | null;
   origen?: string;
   destino?: string;
   vehiculoId?: number;
@@ -68,12 +71,14 @@ export interface PreciosBoleteria {
 export interface ParadasBoleteria {
   cochabamba: VehiculoBoleteria[];
   eterazama: VehiculoBoleteria[];
+  porSalir: VehiculoBoleteria[];
   precios: PreciosBoleteria;
 }
 
 export interface VehiculoBoleteria extends Vehiculo {
   ocupadosTotal: number;
   asientosChofer: number[];
+  salidaProgramada?: string | null;
   pasajes?: Pasaje[];
 }
 

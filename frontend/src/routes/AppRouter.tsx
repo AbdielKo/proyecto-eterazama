@@ -7,9 +7,9 @@ import MainLayout from "../layouts/MainLayout";
 import ChoferLayout from "../layouts/ChoferLayout";
 import PasajeroLayout from "../layouts/PasajeroLayout";
 
-import GestionFlota from "../features/secretaria/GestionFlota";
 import Dashboard from "../features/secretaria/Dashboard";
 import GestionFila from "../features/secretaria/GestionFila";
+import ChoferesActivos from "../features/secretaria/ChoferesActivos";
 import Boleteria from "../features/secretaria/Boleteria";
 import CajaCentral from "../features/secretaria/CajaCentral";
 import HistorialVentas from "../features/secretaria/HistorialVentas";
@@ -21,6 +21,7 @@ import Reportes from "../features/secretaria/Reportes";
 import Configuracion from "../features/secretaria/Configuracion";
 import Reembolsos from "../features/secretaria/Reembolsos";
 import Perfil from "../features/secretaria/Perfil";
+import NotificacionesSecretaria from "../features/secretaria/NotificacionesSecretaria";
 
 import PasajeroInicio from "../features/pasajero/PasajeroInicio";
 import BuscarViaje from "../features/pasajero/BuscarViaje";
@@ -69,8 +70,8 @@ export default function AppRouter() {
         >
           <Route index element={<Dashboard />} />
           <Route path="dashboard" element={<Dashboard />} />
-          <Route path="flota" element={<GestionFlota />} />
           <Route path="fila" element={<GestionFila />} />
+          <Route path="choferes-activos" element={<ChoferesActivos />} />
           <Route path="boleteria" element={<Boleteria />} />
           <Route path="caja" element={<CajaCentral />} />
           <Route path="historial" element={<HistorialVentas />} />
@@ -80,6 +81,7 @@ export default function AppRouter() {
           <Route path="graficas" element={<GraficasReviews />} />
           <Route path="reportes" element={<Reportes />} />
           <Route path="reembolsos" element={<Reembolsos />} />
+          <Route path="notificaciones" element={<NotificacionesSecretaria />} />
           <Route path="configuracion" element={<Configuracion />} />
           <Route path="perfil" element={<Perfil />} />
         </Route>

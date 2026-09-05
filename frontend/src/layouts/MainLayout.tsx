@@ -2,17 +2,20 @@ import { Outlet, Link, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { useTheme } from "../hooks/useTheme";
 import {
-  Bus, LayoutDashboard, Car, MapPin, Ticket, DollarSign,
+  Bus, LayoutDashboard, MapPin, Ticket, DollarSign,
   ClipboardList, Users, Star, BarChart3, FileText, Settings,
   User, LogOut, ChevronDown, ChevronRight, Sun, Moon, Maximize, Minimize,
-  Undo2
+  Undo2, Activity
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { obtenerNotificacionesSecretaria } from "../api/secretaria.api";
+import { useNotificacionesSecretariaSocket } from "../hooks/useNotificacionesSecretariaSocket";
+import { Bell } from "lucide-react";
 
 const menuItems = [
   { to: "/secretaria", label: "Dashboard", icon: LayoutDashboard },
-  { to: "/secretaria/flota", label: "Gestion de Flota", icon: Car },
   { to: "/secretaria/fila", label: "Filas y Paradas", icon: MapPin },
+  { to: "/secretaria/choferes-activos", label: "Choferes activos", icon: Activity },
   { to: "/secretaria/boleteria", label: "Boleteria", icon: Ticket },
   { to: "/secretaria/caja", label: "Caja Central", icon: DollarSign },
   { to: "/secretaria/historial", label: "Historial Ventas", icon: ClipboardList },
@@ -22,6 +25,7 @@ const menuItems = [
   { to: "/secretaria/graficas", label: "Graficas Reviews", icon: BarChart3 },
   { to: "/secretaria/reportes", label: "Reportes", icon: FileText },
   { to: "/secretaria/reembolsos", label: "Reembolsos", icon: Undo2 },
+  { to: "/secretaria/notificaciones", label: "Notificaciones", icon: Bell },
   { to: "/secretaria/configuracion", label: "Configuracion", icon: Settings },
 ];
 
@@ -32,6 +36,19 @@ export default function MainLayout() {
   const location = useLocation();
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [fullscreen, setFullscreen] = useState(Boolean(document.fullscreenElement));
+  const [noLeidas, setNoLeidas] = useState(0);
+
+  function cargarNoLeidas() {
+    obtenerNotificacionesSecretaria()
+      .then((ns) => setNoLeidas(ns.filter((n) => !n.leida).length))
+      .catch(console.error);
+  }
+
+  useNotificacionesSecretariaSocket(cargarNoLeidas);
+
+  useEffect(() => {
+    cargarNoLeidas();
+  }, []);
 
   useEffect(() => {
     function onCambio() {
@@ -133,6 +150,11 @@ export default function MainLayout() {
               >
                 <Icon className="w-4 h-4 shrink-0" />
                 <span className="truncate">{item.label}</span>
+                {item.to === "/secretaria/notificaciones" && noLeidas > 0 && (
+                  <span className="ml-auto text-[10px] bg-sky-600 text-white w-5 h-5 rounded-full flex items-center justify-center">
+                    {noLeidas > 99 ? "99+" : noLeidas}
+                  </span>
+                )}
               </Link>
             );
           })}

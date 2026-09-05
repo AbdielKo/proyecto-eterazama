@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Put,
+  Patch,
   Body,
   Query,
   Param,
@@ -36,6 +37,18 @@ export class SecretariaController {
     return this.secretariaService.obtenerNomina();
   }
 
+  // Choferes activos (estado operativo en tiempo real del submenú)
+  @Get('choferes-activos')
+  obtenerChoferesActivos() {
+    return this.secretariaService.obtenerChoferesActivos();
+  }
+
+  // Vehículos sin chofer oficial asociado (solo informe, nunca se eliminan)
+  @Get('vehiculos-sin-chofer')
+  vehiculosSinChoferOficial() {
+    return this.secretariaService.vehiculosSinChoferOficial();
+  }
+
   // Historial de ventas con filtros (día/semana/mes/chofer/vehículo)
   @Get('ventas')
   obtenerVentas(
@@ -48,6 +61,12 @@ export class SecretariaController {
       choferId,
       placa,
     });
+  }
+
+  // Detalle de una venta (consultar, NUNCA modifica registros). Solo Secretaría.
+  @Get('ventas/:id')
+  obtenerDetalleVenta(@Param('id') id: string) {
+    return this.secretariaService.obtenerDetalleVenta(id);
   }
 
   // Caja central (totales reales)
@@ -130,5 +149,26 @@ export class SecretariaController {
   @Post('boleteria/venta')
   venderBoleteria(@Body() body: VentaBoleteriaDto) {
     return this.secretariaService.venderBoleteria(body);
+  }
+
+  // =============================================================
+  // SOLICITUDES DE RETIRO VOLUNTARIO DE LA FILA
+  // =============================================================
+
+  @Get('retiros')
+  listarSolicitudesRetiro(@Query('estado') estado?: string) {
+    return this.secretariaService.listarSolicitudesRetiro(estado);
+  }
+
+  @Patch('retiros/:id/aprobar')
+  aprobarRetiro(@Param('id') id: string, @Req() req: any, @Body('comentario') comentario?: string) {
+    const nombre = req.user?.username || req.user?.userId || 'Secretaria';
+    return this.secretariaService.aprobarRetiro(id, nombre, comentario);
+  }
+
+  @Patch('retiros/:id/rechazar')
+  rechazarRetiro(@Param('id') id: string, @Req() req: any, @Body('comentario') comentario?: string) {
+    const nombre = req.user?.username || req.user?.userId || 'Secretaria';
+    return this.secretariaService.rechazarRetiro(id, nombre, comentario);
   }
 }

@@ -11,6 +11,10 @@ export interface NominaItem {
   estado: string;
   vehiculo: string | null;
   placa: string | null;
+  vehiculoId?: number | null;
+  tipoVehiculo?: string | null;
+  color?: string | null;
+  capacidadTotal?: number | null;
   paradaActual?: string;
   estadoVehiculo?: string;
   totalViajes: number;
@@ -91,12 +95,84 @@ export async function obtenerNomina(): Promise<NominaItem[]> {
   return respuesta.data;
 }
 
+// =============================================================
+// CHOFERES ACTIVOS (submenú de Secretaría, estado en tiempo real)
+// =============================================================
+
+export interface ChoferActivo {
+  id: string;
+  choferNombre: string;
+  placa: string | null;
+  estadoServicio: string;
+  ubicacion: string;
+  estadoFila: "en_fila_cochabamba" | "en_fila_eterazama" | "ubicado" | "fuera";
+  puestoFila: number;
+  pasajeros: number;
+  estadoDelViaje: string;
+  estadoVehiculo: string;
+  noAnotado: boolean;
+  viajeActual:
+    | { origen: string | null; destino: string | null; estadoViaje: string }
+    | null;
+}
+
+export async function obtenerChoferesActivos(): Promise<ChoferActivo[]> {
+  const respuesta = await api.get("/secretaria/choferes-activos");
+  return respuesta.data;
+}
+
+export interface VehiculosSinChofer {
+  cantidad: number;
+  vehiculos: { id: number; placa: string; choferNombre: string }[];
+}
+
+export async function obtenerVehiculosSinChofer(): Promise<VehiculosSinChofer> {
+  const respuesta = await api.get("/secretaria/vehiculos-sin-chofer");
+  return respuesta.data;
+}
+
 export async function obtenerVentasSecretaria(params: {
   periodo?: string;
   choferId?: string;
   placa?: string;
 }): Promise<VentasResponse> {
   const respuesta = await api.get("/secretaria/ventas", { params });
+  return respuesta.data;
+}
+
+// =============================================================
+// DETALLE DE VENTA (modal de consulta del historial)
+// Solo lectura: nunca modifica registros.
+// =============================================================
+
+export interface VehiculoDetalleVenta {
+  placa: string;
+  tipoVehiculo: string;
+  color: string;
+  choferNombre: string;
+  choferCi?: string | null;
+  capacidadTotal: number;
+}
+
+export interface UsuarioDetalleVenta {
+  id: string;
+  nombreUsuario: string;
+  nombre: string | null;
+  apellidos: string | null;
+  gmail: string | null;
+  telefono: string | null;
+  rol: string;
+}
+
+export interface DetalleVenta {
+  venta: Pasaje;
+  vehiculo: VehiculoDetalleVenta | null;
+  pasajeroUsuario: UsuarioDetalleVenta | null;
+  precioPorAsiento: number | null;
+}
+
+export async function obtenerDetalleVenta(id: string): Promise<DetalleVenta> {
+  const respuesta = await api.get(`/secretaria/ventas/${id}`);
   return respuesta.data;
 }
 
@@ -162,6 +238,8 @@ export async function crearChofer(datos: {
   capacidadTotal?: number;
   tipoVehiculo?: string;
   color?: string;
+  filas?: (number | null)[][];
+  asientosChofer?: number[];
 }) {
   const respuesta = await api.post("/auth/secretaria/choferes", datos);
   return respuesta.data;
@@ -171,5 +249,88 @@ export async function asignarRolChofer(userId: string) {
   const respuesta = await api.patch(`/auth/secretaria/usuario/${userId}/rol`, {
     rol: "chofer",
   });
+  return respuesta.data;
+}
+
+// =============================================================
+// SOLICITUDES DE RETIRO DE LA FILA
+// =============================================================
+
+export interface SolicitudRetiro {
+  id: string;
+  choferId: string;
+  choferNombre: string | null;
+  placa: string;
+  vehiculoId: number | null;
+  parada: string;
+  puestoFila: number;
+  tienePasajeros: boolean;
+  cantidadAsientos: number;
+  motivo: string;
+  estado: "PENDIENTE" | "ACEPTADA" | "RECHAZADA";
+  procesadoPor: string | null;
+  comentarioRespuesta: string | null;
+  fechaCreacion?: string;
+}
+
+export async function obtenerSolicitudesRetiro(
+  estado?: string
+): Promise<SolicitudRetiro[]> {
+  const params = estado ? { estado } : {};
+  const respuesta = await api.get("/secretaria/retiros", { params });
+  return respuesta.data;
+}
+
+export async function aprobarRetiro(
+  id: string,
+  comentario?: string
+): Promise<any> {
+  const respuesta = await api.patch(`/secretaria/retiros/${id}/aprobar`, {
+    comentario,
+  });
+  return respuesta.data;
+}
+
+export async function rechazarRetiro(
+  id: string,
+  comentario?: string
+): Promise<any> {
+  const respuesta = await api.patch(`/secretaria/retiros/${id}/rechazar`, {
+    comentario,
+  });
+  return respuesta.data;
+}
+
+// =============================================================
+// NOTIFICACIONES DEL ROL SECRETARIA (flujo de salida)
+// Persistidas en PostgreSQL (tabla notificaciones_secretaria).
+// =============================================================
+
+export interface NotificacionSecretaria {
+  id: string;
+  secretariaId: string;
+  tipo: string;
+  titulo: string;
+  mensaje: string;
+  leida: boolean;
+  fechaCreacion: string;
+}
+
+export async function obtenerNotificacionesSecretaria(): Promise<NotificacionSecretaria[]> {
+  const respuesta = await api.get("/secretaria/notificaciones");
+  return respuesta.data;
+}
+
+export async function marcarNotificacionSecretariaLeida(
+  id: string
+): Promise<NotificacionSecretaria> {
+  const respuesta = await api.patch(`/secretaria/notificaciones/${id}/leer`);
+  return respuesta.data;
+}
+
+export async function marcarTodasNotificacionesSecretariaLeidas(): Promise<{
+  actualizadas: number;
+}> {
+  const respuesta = await api.patch("/secretaria/notificaciones/todas-leer");
   return respuesta.data;
 }

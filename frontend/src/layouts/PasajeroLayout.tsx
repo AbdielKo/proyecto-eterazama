@@ -1,11 +1,13 @@
 import { Outlet, Link, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { useTheme } from "../hooks/useTheme";
+import { useNotificacionesSocket } from "../hooks/useNotificacionesSocket";
+import { obtenerNotificaciones } from "../api/pasajero.api";
 import {
   Bus, Home, Search, Wallet, Star, Heart,
   User, Bell, HelpCircle, LogOut, ChevronDown, ChevronRight, History, FileText, Sun, Moon
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const menuItems = [
   { to: "/pasajero", label: "Inicio", icon: Home },
@@ -26,6 +28,25 @@ export default function PasajeroLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [noLeidas, setNoLeidas] = useState(0);
+
+  async function cargarNoLeidas() {
+    try {
+      const data = await obtenerNotificaciones();
+      setNoLeidas(data.filter((n) => !n.leida).length);
+    } catch {
+      // Sin token o error de red: se ignora, el badge queda como estaba.
+    }
+  }
+
+  // Contador al entrar/recargar y en tiempo real cuando llega una notificación.
+  useEffect(() => {
+    cargarNoLeidas();
+  }, []);
+
+  useNotificacionesSocket(() => {
+    cargarNoLeidas();
+  });
 
   function handleLogout() {
     logout();
@@ -49,7 +70,11 @@ export default function PasajeroLayout() {
           </button>
           <Link to="/pasajero/notificaciones" className="relative p-2 text-gray-400 hover:text-white transition-colors">
             <Bell className="w-5 h-5" />
-            <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full" />
+            {noLeidas > 0 && (
+              <span className="absolute top-0 right-0 min-w-[16px] h-4 px-1 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+                {noLeidas > 99 ? "99+" : noLeidas}
+              </span>
+            )}
           </Link>
           <div className="relative">
             <button
@@ -98,6 +123,11 @@ export default function PasajeroLayout() {
               >
                 <Icon className="w-4 h-4 shrink-0" />
                 <span className="truncate">{item.label}</span>
+                {item.label === "Notificaciones" && noLeidas > 0 && (
+                  <span className="ml-auto min-w-[18px] h-[18px] px-1 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+                    {noLeidas > 99 ? "99+" : noLeidas}
+                  </span>
+                )}
               </Link>
             );
           })}

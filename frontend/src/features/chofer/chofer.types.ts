@@ -1,5 +1,6 @@
 export interface ChoferInicio {
   nombre: string;
+  estadoServicio?: string;
   vehiculo: string | null;
   placa: string | null;
   paradaActual: string | null;
@@ -10,6 +11,7 @@ export interface ChoferInicio {
   asientosOcupados: number;
   asientosDisponibles: number;
   calificacionPromedio: number;
+  configuracionPendiente?: boolean;
 }
 
 export interface MapaAsientoChofer {
@@ -29,12 +31,16 @@ export interface MiVehiculo {
   capacidadTotal: number;
   estadoVehiculo: string;
   estadoViaje: string;
+  salidaProgramada?: string | null;
   qrImagenUrl: string | null;
   paradaActual: string;
   puestoFila: number;
   horaIngresoFila: string | null;
   fechaEstado: string | null;
   asientosOcupados: number[];
+  asientosChofer: number[];
+  configuracionPendiente?: boolean;
+  configuracionAsientos?: { ancho: number; filas: (number | null)[][] } | null;
   ocupadosTotal: number;
   asientosLibres: number;
   mapaAsientos: MapaAsientoChofer[];
@@ -48,10 +54,14 @@ export interface VehiculoFila {
   choferNombre: string;
   choferCi: string | null;
   estado: string;
+  estadoViaje?: string;
+  salidaProgramada?: string | null;
   horaIngresoFila: string | null;
+  pasajeros?: number;
 }
 
 export interface MiFila {
+  ubicacion: string;
   paradaActual: string;
   yaRegistrado: boolean;
   miPuesto: number;
@@ -59,12 +69,20 @@ export interface MiFila {
   totalEnFila: number;
   estadoVehiculo: string;
   estadoViaje: string;
+  salidaProgramada?: string | null;
   cochabamba: VehiculoFila[];
   eterazama: VehiculoFila[];
+  porSalir: VehiculoFila[];
   enRuta: VehiculoFila[];
   fueraDeFila: VehiculoFila[];
   delante: VehiculoFila[];
   detras: VehiculoFila[];
+}
+
+export interface CambiarUbicacionRespuesta {
+  paradaActual: "cochabamba" | "eterazama";
+  puestoFila: number;
+  mensaje: string;
 }
 
 export interface EstadoVehiculoActualizado {
@@ -72,6 +90,29 @@ export interface EstadoVehiculoActualizado {
   estadoViaje: string;
   paradaActual: string;
   fechaEstado: string | null;
+}
+
+export interface SolicitudRetiro {
+  id: string;
+  choferId: string;
+  choferNombre: string | null;
+  placa: string;
+  vehiculoId: number | null;
+  parada: string;
+  puestoFila: number;
+  tienePasajeros: boolean;
+  cantidadAsientos: number;
+  motivo: string;
+  estado: "PENDIENTE" | "ACEPTADA" | "RECHAZADA";
+  procesadoPor: string | null;
+  comentarioRespuesta: string | null;
+  fechaCreacion?: string;
+}
+
+export interface RespuestaSolicitarRetiro {
+  solicitud: SolicitudRetiro;
+  aprobacionAutomatica: boolean;
+  mensaje: string;
 }
 
 export interface MiViaje {
@@ -139,6 +180,7 @@ export interface PerfilChofer {
   gmail: string | null;
   telefono: string | null;
   rol: string;
+  estado?: string;
   placaAsignada: string | null;
   fechaRegistro: string;
 }

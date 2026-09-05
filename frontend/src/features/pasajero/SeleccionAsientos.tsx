@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import { obtenerVehiculos } from "../../api/flota.api";
 import type { Vehiculo } from "../../types/vehiculo";
-import { CheckCircle, Circle } from "lucide-react";
+import {
+  normalizarConfiguracion,
+  numeroAsientosVendibles,
+} from "../../utils/asientos-config";
+import DistribucionAsientos from "../../components/DistribucionAsientos";
 
 interface Props {
   placa: string;
@@ -20,7 +24,6 @@ export default function SeleccionAsientos({ placa, onSeleccionar }: Props) {
   }, [placa]);
 
   function toggleAsiento(num: number) {
-    if (asientosChofer.includes(num)) return;
     setSeleccionados((prev) => {
       const nuevos = prev.includes(num) ? prev.filter((a) => a !== num) : [...prev, num];
       return nuevos;
@@ -33,9 +36,10 @@ export default function SeleccionAsientos({ placa, onSeleccionar }: Props) {
 
   if (!vehiculo) return <p className="text-gray-500">Cargando vehiculo...</p>;
 
-  const totalAsientos = Math.max(4, vehiculo.capacidadTotal || 12);
-  const ocupados = vehiculo.asientosOcupados || [];
-  const asientosChofer = [1, 2];
+  const capacidad = vehiculo.capacidadTotal || 12;
+  const config = normalizarConfiguracion(vehiculo.configuracionAsientos, capacidad);
+  const chofer = vehiculo.asientosChofer || [];
+  const vendibles = numeroAsientosVendibles(config) - chofer.length;
 
   return (
     <div className="space-y-4">
@@ -45,44 +49,24 @@ export default function SeleccionAsientos({ placa, onSeleccionar }: Props) {
           <p className="text-sm text-gray-400">{vehiculo.placa} - {vehiculo.choferNombre}</p>
         </div>
         <span className="text-sm text-gray-500">
-          {seleccionados.length} seleccionados
+          {seleccionados.length} seleccionados de {vendibles}
         </span>
       </div>
 
-      <div className="grid grid-cols-4 gap-2 max-w-sm">
-        {Array.from({ length: totalAsientos }, (_, i) => i + 1).map((num) => {
-          const ocupado = ocupados.includes(num) || asientosChofer.includes(num);
-          const seleccionado = seleccionados.includes(num);
-          return (
-            <button
-              key={num}
-              onClick={() => !ocupado && toggleAsiento(num)}
-              disabled={ocupado}
-              className={`flex items-center justify-center gap-1 p-3 rounded-xl text-sm font-medium transition-all cursor-pointer ${
-                ocupado
-                  ? asientosChofer.includes(num)
-                    ? "bg-amber-600/20 text-amber-400 cursor-not-allowed"
-                    : "bg-red-600/20 text-red-400 cursor-not-allowed"
-                  : seleccionado
-                  ? "bg-sky-600 text-white ring-2 ring-sky-400"
-                  : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white"
-              }`}
-            >
-              {ocupado ? (
-                <Circle className="w-4 h-4" />
-              ) : seleccionado ? (
-                <CheckCircle className="w-4 h-4" />
-              ) : null}
-              {num}
-            </button>
-          );
-        })}
-      </div>
+      <DistribucionAsientos
+        config={config}
+        asientosChofer={chofer}
+        asientosOcupados={vehiculo.asientosOcupados}
+        seleccionados={seleccionados}
+        onSeleccionar={(num) => toggleAsiento(num)}
+      />
 
       <div className="flex gap-4 text-xs text-gray-500">
-        <div className="flex items-center gap-1"><span className="w-3 h-3 bg-gray-800 rounded" /> Disponible</div>
+        <div className="flex items-center gap-1"><span className="w-3 h-3 bg-amber-600/30 border border-amber-600/40 rounded" /> Chofer</div>
+        <div className="flex items-center gap-1"><span className="w-3 h-3 bg-gray-800 border border-gray-700 rounded" /> Disponible</div>
         <div className="flex items-center gap-1"><span className="w-3 h-3 bg-sky-600 rounded" /> Seleccionado</div>
         <div className="flex items-center gap-1"><span className="w-3 h-3 bg-red-600/30 rounded" /> Ocupado</div>
+        <div className="flex items-center gap-1"><span className="w-3 h-3 bg-gray-900 border border-dashed border-gray-700 rounded" /> Espacio</div>
       </div>
 
       {seleccionados.length > 0 && (

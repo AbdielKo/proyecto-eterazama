@@ -6,6 +6,8 @@ import {
   Length,
   MaxLength,
   Min,
+  IsArray,
+  IsInt,
 } from 'class-validator';
 
 export class CrearChoferDto {
@@ -60,4 +62,13 @@ export class CrearChoferDto {
   @IsString()
   @MaxLength(30)
   color?: string;
+
+  @IsOptional()
+  @IsArray()
+  filas?: (number | null)[][];
+
+  @IsOptional()
+  @IsArray()
+  @IsInt({ each: true })
+  asientosChofer?: number[];
 }

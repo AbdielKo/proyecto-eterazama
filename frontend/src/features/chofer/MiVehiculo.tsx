@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { obtenerMiVehiculo } from "./chofer.api";
 import type { MiVehiculo, MapaAsientoChofer } from "./chofer.types";
 import { useFlotaSocket } from "../../hooks/useFlotaSocket";
+import DistribucionAsientos from "../../components/DistribucionAsientos";
 import { Car, Palette, Hash, Users, QrCode, MapPin, Armchair, CircleDot, Fingerprint, Clock, User as UserIcon, X } from "lucide-react";
 
 function formatFecha(fecha: string | null) {
@@ -47,40 +48,17 @@ function estadoPasajeLabel(estado: string | null) {
   return estado ? map[estado] || estado : null;
 }
 
-function generarFilas(capacidadTotal: number): number[][] {
-  const filas: number[][] = [];
-  for (let i = 1; i <= capacidadTotal; i += 3) {
-    filas.push([i, i + 1, i + 2].filter((n) => n <= capacidadTotal));
-  }
-  return filas;
-}
-
-type EstadoAsientoChofer = "chofer" | "bloqueado" | "disponible" | "ocupado";
-
-function tipoEstado(a: MapaAsientoChofer): EstadoAsientoChofer {
-  if (a.numero <= 1) return "chofer";
-  if (a.numero === 2) return "bloqueado";
-  return a.estado === "ocupado" ? "ocupado" : "disponible";
-}
-
-function estiloAsiento(tipo: EstadoAsientoChofer) {
-  if (tipo === "chofer") return "bg-amber-600/30 text-amber-400 border border-amber-600/30";
-  if (tipo === "bloqueado") return "bg-gray-700/50 text-gray-600 border border-gray-700";
-  if (tipo === "ocupado") return "bg-red-600/20 text-red-400 border border-red-600/20";
-  return "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white border border-gray-700";
-}
-
-function claseSeleccionado(tipo: EstadoAsientoChofer, ocupadoSeleccionado: boolean) {
-  if (tipo === "ocupado" && ocupadoSeleccionado) return "ring-2 ring-sky-400 bg-sky-600 text-white border-sky-500";
-  return estiloAsiento(tipo);
-}
-
 export default function MiVehiculoPage() {
   const [vehiculo, setVehiculo] = useState<MiVehiculo | null>(null);
   const [asientoSeleccionado, setAsientoSeleccionado] = useState<MapaAsientoChofer | null>(null);
 
   function cargar() {
     obtenerMiVehiculo().then(setVehiculo).catch(console.error);
+  }
+
+  function abrirOcupado(num: number) {
+    const asiento = vehiculo?.mapaAsientos.find((a) => a.numero === num);
+    if (asiento) setAsientoSeleccionado(asiento);
   }
 
   useFlotaSocket(cargar);
@@ -104,8 +82,15 @@ export default function MiVehiculoPage() {
   const paradaLabel = vehiculo.paradaActual === "en_ruta" ? "En ruta" : vehiculo.paradaActual === "fuera_de_fila" ? "Fuera de fila" : vehiculo.paradaActual === "eterazama" ? "Eterazama" : "Cochabamba";
 
   const capacidadMuestra = Math.max(4, vehiculo.capacidadTotal || 12);
-  const filasAsientos = generarFilas(capacidadMuestra);
-  const ocupadoSeleccionadoNumero = asientoSeleccionado?.numero;
+  const configAsientos = (() => {
+    const cfg = vehiculo.configuracionAsientos;
+    if (cfg && Array.isArray(cfg.filas) && cfg.filas.length > 0) return cfg;
+    const filas: (number | null)[][] = [];
+    for (let i = 1; i <= capacidadMuestra; i += 3) {
+      filas.push([i, i + 1, i + 2].filter((n) => n <= capacidadMuestra));
+    }
+    return { ancho: 3, filas };
+  })();
 
   return (
     <div className="space-y-6">
@@ -240,39 +225,18 @@ export default function MiVehiculoPage() {
             <span className="flex items-center gap-1.5">
               <span className="w-3 h-3 rounded bg-red-600/30 border border-red-600/20"></span> Ocupado
             </span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded bg-gray-900 border border-dashed border-gray-700"></span> Espacio
+            </span>
           </div>
         </div>
 
-        <div className="flex flex-col items-center gap-1.5 max-w-xs mx-auto">
-          <div className="bg-gray-700 rounded-t-xl w-full py-1.5 text-center text-[10px] text-gray-400 font-medium tracking-widest">
-            FRENTE
-          </div>
-          {filasAsientos.map((fila, fi) => (
-            <div key={fi} className="flex justify-center gap-1.5">
-              {fila.map((num) => {
-                const asiento = vehiculo.mapaAsientos.find((a) => a.numero === num);
-                if (!asiento) return null;
-                const tipo = tipoEstado(asiento);
-                const esChofer = tipo === "chofer";
-                const clickeable = tipo === "ocupado";
-                return (
-                  <button
-                    key={num}
-                    onClick={() => clickeable && setAsientoSeleccionado(asiento)}
-                    disabled={!clickeable}
-                    title={tipo === "ocupado" ? "Toca para ver el pasajero" : undefined}
-                    className={`w-12 h-12 rounded-lg text-xs font-medium transition-all cursor-pointer flex flex-col items-center justify-center ${
-                      claseSeleccionado(tipo, asiento.numero === ocupadoSeleccionadoNumero)
-                    } ${clickeable ? "hover:ring-2 hover:ring-red-400/40" : ""}`}
-                  >
-                    <span className="text-[10px] leading-none">{num}</span>
-                    {esChofer && <span className="text-[7px] leading-none mt-0.5">CHOFER</span>}
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-        </div>
+        <DistribucionAsientos
+          config={configAsientos}
+          asientosChofer={vehiculo.asientosChofer}
+          asientosOcupados={vehiculo.asientosOcupados}
+          onClickOcupado={abrirOcupado}
+        />
 
         <p className="text-xs text-gray-500 mt-4 text-center">
           Toca un asiento ocupado para ver la informacion del pasajero.

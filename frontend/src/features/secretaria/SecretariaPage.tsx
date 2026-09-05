@@ -32,8 +32,8 @@ export default function SecretariaPage() {
   ];
 
   const links = [
-    { to: "/secretaria/flota", label: "Gestion de Flota", icon: "🚍", desc: "Administrar vehiculos" },
     { to: "/secretaria/fila", label: "Paradas y Filas", icon: "📍", desc: "Control de paradas" },
+    { to: "/secretaria/choferes-activos", label: "Choferes activos", icon: "🧑‍✈️", desc: "Estado en tiempo real" },
     { to: "/secretaria/caja", label: "Caja Central", icon: "💰", desc: "Resumen financiero" },
     { to: "/secretaria/historial", label: "Historial Ventas", icon: "📋", desc: "Registro de ventas" },
     { to: "/secretaria/choferes", label: "Nomina Choferes", icon: "👨‍✈️", desc: "Gestion de choferes" },

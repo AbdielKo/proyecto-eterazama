@@ -72,7 +72,15 @@ export default function BuscarViaje() {
 
   function CardVehiculo({ v }: { v: Vehiculo }) {
     const totalAsientos = v.capacidadTotal || 12;
-    const asientosLibres = totalAsientos - 2 - (v.asientosOcupados?.length || 0);
+    const vendibles = (() => {
+      if (v.configuracionAsientos && Array.isArray(v.configuracionAsientos.filas)) {
+        return v.configuracionAsientos.filas
+          .flat()
+          .filter((c): c is number => typeof c === "number").length;
+      }
+      return totalAsientos;
+    })();
+    const asientosLibres = Math.max(0, vendibles - (v.asientosChofer?.length || 0) - (v.asientosOcupados?.length || 0));
     return (
       <div className="bg-gray-800 rounded-xl p-3 space-y-2">
         <div className="flex items-center justify-between">

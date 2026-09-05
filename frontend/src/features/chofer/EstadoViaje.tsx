@@ -1,19 +1,19 @@
 import { useEffect, useState } from "react";
-import { obtenerMiVehiculo, cambiarEstadoVehiculo, cambiarEstadoViaje } from "./chofer.api";
+import { obtenerMiVehiculo, cambiarEstadoViaje, programarSalida } from "./chofer.api";
 import type { MiVehiculo } from "./chofer.types";
 import { useFlotaSocket } from "../../hooks/useFlotaSocket";
-import { Truck, Flag, Wrench, Power, Car, AlertTriangle, X, CheckCircle } from "lucide-react";
+import { Truck, Flag, Wrench, Car, AlertTriangle, X, CheckCircle, Timer } from "lucide-react";
 
-// Estado UNICO del vehiculo. ACTIVO, EN RUTA, FINALIZO RUTA y MANTENIMIENTO
-// son un solo estado sincronizado entre Chofer y Secretaria. Cada estado
-// dispara la llamada al backend correspondiente.
+// Estado UNICO del vehiculo. POR SALIR, EN RUTA, FINALIZO RUTA y
+// MANTENIMIENTO son un solo estado sincronizado entre Chofer y Secretaria.
+// El estado ACTIVO/INACTIVO del chofer se controla unicamente desde Inicio.
 const estados = [
   {
-    key: "activo",
-    label: "ACTIVO",
-    icon: Power,
-    color: "bg-emerald-600 hover:bg-emerald-700",
-    desc: "Tu trufi queda listo y disponible para operar.",
+    key: "por_salir",
+    label: "POR SALIR",
+    icon: Timer,
+    color: "bg-blue-600 hover:bg-blue-700",
+    desc: "Programa la salida de tu trufi: parte en 10 minutos.",
   },
   {
     key: "en_ruta",
@@ -41,6 +41,7 @@ const estados = [
 function etiqueta(key: string) {
   const map: Record<string, string> = {
     activo: "Activo",
+    por_salir: "Por salir",
     en_ruta: "En ruta",
     fin_de_ruta: "Fin de la ruta",
     mantenimiento: "Mantenimiento",
@@ -52,6 +53,7 @@ function etiqueta(key: string) {
 function badgeColor(estadoActual: string) {
   const colores: Record<string, string> = {
     activo: "bg-emerald-400/10 text-emerald-400",
+    por_salir: "bg-blue-400/10 text-blue-400",
     en_ruta: "bg-sky-400/10 text-sky-400",
     fin_de_ruta: "bg-purple-400/10 text-purple-400",
     mantenimiento: "bg-amber-400/10 text-amber-400",
@@ -62,9 +64,32 @@ function badgeColor(estadoActual: string) {
 // Deriva el estado unico actual a partir de los dos campos de la BD.
 function estadoActual(v: MiVehiculo): string {
   if (v.estadoViaje === "mantenimiento") return "mantenimiento";
+  if (v.estadoViaje === "por_salir") return "por_salir";
   if (v.estadoViaje === "en_ruta") return "en_ruta";
   if (v.estadoViaje === "fin_de_ruta") return "fin_de_ruta";
   return "activo";
+}
+
+// Cuenta regresiva del estado POR SALIR (salidaProgramada viene de PostgreSQL).
+function useTemporizador(salida: string | null | undefined) {
+  const [restante, setRestante] = useState<number>(0);
+  useEffect(() => {
+    if (!salida) return;
+    setRestante(Math.max(0, new Date(salida).getTime() - Date.now()));
+    const id = setInterval(() => {
+      setRestante(Math.max(0, new Date(salida).getTime() - Date.now()));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [salida]);
+  const mins = Math.floor(restante / 60000);
+  const segs = Math.floor((restante % 60000) / 1000);
+  return { mins, segs, terminado: restante <= 0 };
+}
+
+function TemporizadorSalida({ salida }: { salida: string | null | undefined }) {
+  const { mins, segs, terminado } = useTemporizador(salida);
+  if (terminado) return <span>partiendo...</span>;
+  return <span>sale en {String(mins).padStart(2, "0")}:{String(segs).padStart(2, "0")}</span>;
 }
 
 export default function EstadoViaje() {
@@ -97,13 +122,15 @@ export default function EstadoViaje() {
     setCambiando(true);
     setNotificacion(null);
     try {
-      if (key === "activo") {
-        await cambiarEstadoVehiculo("activo");
+      if (key === "por_salir") {
+        const res = await programarSalida();
+        cargar();
+        setNotificacion({ tipo: "ok", texto: res.mensaje || "Salida programada correctamente." });
       } else {
         await cambiarEstadoViaje(key);
+        cargar();
+        setNotificacion({ tipo: "ok", texto: `Estado actualizado correctamente a "${etiqueta(key)}".` });
       }
-      cargar();
-      setNotificacion({ tipo: "ok", texto: `Estado actualizado correctamente a "${etiqueta(key)}".` });
     } catch (e: any) {
       setNotificacion({
         tipo: "error",
@@ -121,7 +148,7 @@ export default function EstadoViaje() {
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold text-white">Estado del Trufi</h1>
-        <p className="text-gray-400 mt-1">Controla el estado de tu vehiculo: ACTIVO, EN RUTA, FINALIZO RUTA o MANTENIMIENTO</p>
+        <p className="text-gray-400 mt-1">Controla el estado de tu vehiculo: POR SALIR, EN RUTA, FINALIZO RUTA o MANTENIMIENTO. Tu estado ACTIVO/INACTIVO se controla desde Inicio.</p>
       </div>
 
       {notificacion && (
@@ -164,6 +191,12 @@ export default function EstadoViaje() {
               <div className="flex items-center gap-2 bg-sky-500/10 border border-sky-500/30 text-sky-400 rounded-xl px-4 py-3 text-sm">
                 <Truck className="w-4 h-4 shrink-0" />
                 Tu vehiculo esta EN RUTA. Los reembolsos de pasajes quedan bloqueados hasta finalizar la ruta.
+              </div>
+            )}
+            {actual === "por_salir" && (
+              <div className="flex items-center gap-2 bg-blue-500/10 border border-blue-500/30 text-blue-300 rounded-xl px-4 py-3 text-sm">
+                <Timer className="w-4 h-4 shrink-0" />
+                Tu vehiculo esta POR SALIR y ya no recibe nuevas ventas. <TemporizadorSalida salida={vehiculo.salidaProgramada} />
               </div>
             )}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm mt-4">

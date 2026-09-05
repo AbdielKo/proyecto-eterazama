@@ -1,9 +1,14 @@
-import { useState } from "react";
-import { crearVehiculo } from "../../api/flota.api";
+import { useEffect, useState } from "react";
+import { crearVehiculo, crearTipoVehiculo, obtenerTiposVehiculo } from "../../api/flota.api";
 import type { Vehiculo } from "../../types/vehiculo";
 
 interface Props {
   recargar: () => void;
+}
+
+interface TipoVehiculo {
+  id: number;
+  nombre: string;
 }
 
 export default function FormVehiculo({ recargar }: Props) {
@@ -19,11 +24,31 @@ export default function FormVehiculo({ recargar }: Props) {
     asientosOcupados: [],
   } as Vehiculo);
   const [cargando, setCargando] = useState(false);
+  const [tipos, setTipos] = useState<TipoVehiculo[]>([]);
+  const [nuevoTipo, setNuevoTipo] = useState("");
+
+  useEffect(() => {
+    obtenerTiposVehiculo().then(setTipos).catch(console.error);
+  }, []);
 
   function cambiar(e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
     const { name, value } = e.target;
     const numerico = name === "puestoFila" || name === "capacidadTotal";
     setDatos({ ...datos, [name]: numerico ? Number(value) : value });
+  }
+
+  async function guardarNuevoTipo() {
+    const nombre = nuevoTipo.trim();
+    if (!nombre) return;
+    try {
+      const creado = await crearTipoVehiculo(nombre);
+      setTipos((prev) => [...prev, creado]);
+      setDatos((d) => ({ ...d, tipoVehiculo: creado.nombre }));
+      setNuevoTipo("");
+    } catch (e: any) {
+      const msg = e?.response?.data?.message;
+      alert(Array.isArray(msg) ? msg.join(", ") : (msg || "Error al crear el modelo."));
+    }
   }
 
   async function guardar(e: React.FormEvent) {
@@ -82,13 +107,33 @@ export default function FormVehiculo({ recargar }: Props) {
         onChange={cambiar}
         className="bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent transition-all"
       />
-      <input
+      <select
         name="tipoVehiculo"
-        placeholder="Tipo de vehiculo (Trufi, Minibus...)"
         value={datos.tipoVehiculo}
         onChange={cambiar}
-        className="bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent transition-all"
-      />
+        className="bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent transition-all"
+      >
+        <option value="">Selecciona un modelo</option>
+        {tipos.map((t) => (
+          <option key={t.id} value={t.nombre}>{t.nombre}</option>
+        ))}
+      </select>
+      <div className="flex gap-2">
+        <input
+          placeholder="Nuevo modelo"
+          value={nuevoTipo}
+          onChange={(e) => setNuevoTipo(e.target.value)}
+          className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent transition-all"
+        />
+        <button
+          type="button"
+          onClick={guardarNuevoTipo}
+          className="px-3 py-3 bg-sky-600/20 text-sky-400 rounded-xl text-sm font-medium hover:bg-sky-600/30 transition-colors cursor-pointer whitespace-nowrap"
+          title="Agregar nuevo modelo"
+        >
+          + Agregar
+        </button>
+      </div>
       <input
         name="color"
         placeholder="Color"

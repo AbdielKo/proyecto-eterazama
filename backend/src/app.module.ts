@@ -7,6 +7,8 @@ import { AuthModule } from './auth/auth.module';
 import { ReviewModule } from './reviews/review.module';
 import { ChoferModule } from './chofer/chofer.module';
 import { SecretariaModule } from './secretaria/secretaria.module';
+import { NotificacionesModule } from './notificaciones/notificaciones.module';
+import { SalidasModule } from './salidas/salidas.module';
 
 @Module({
   imports: [
@@ -33,6 +35,8 @@ import { SecretariaModule } from './secretaria/secretaria.module';
     ReviewModule,
     ChoferModule,
     SecretariaModule,
+    NotificacionesModule,
+    SalidasModule,
   ],
 })
 export class AppModule {}

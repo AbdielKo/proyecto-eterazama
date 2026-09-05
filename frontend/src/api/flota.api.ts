@@ -113,3 +113,95 @@ return respuesta.data;
 
 
 }
+
+
+
+
+// =============================================================
+// TIPOS / MODELOS DE VEHICULO
+// =============================================================
+
+export async function obtenerTiposVehiculo(){
+
+
+const respuesta =
+await axios.get(
+"/flota/tipos"
+);
+
+
+return respuesta.data;
+
+
+}
+
+
+
+
+export async function crearTipoVehiculo(
+  nombre:string
+){
+
+
+const respuesta =
+await axios.post(
+"/flota/tipos",
+{ nombre }
+);
+
+
+return respuesta.data;
+
+
+}
+
+
+
+
+export async function eliminarTipoVehiculo(
+  id:number
+){
+
+
+const respuesta =
+await axios.delete(
+`/flota/tipos/${id}`
+);
+
+
+return respuesta.data;
+
+
+}
+
+
+
+
+// =============================================================
+// CONFIGURACION DINAMICA DE ASIENTOS
+// =============================================================
+
+export async function configurarAsientos(
+  id:number,
+  filas:(number | null)[][],
+  asientosChofer:number[]
+){
+
+
+const respuesta =
+await axios.patch(
+
+`/flota/${id}/asientos`,
+
+{
+  filas,
+  asientosChofer,
+}
+
+);
+
+
+return respuesta.data;
+
+
+}

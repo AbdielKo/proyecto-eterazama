@@ -35,6 +35,12 @@ export class Pasaje {
   @Column({ nullable: true })
   vehiculoId: number;
 
+  // Vínculo del pasaje a la cuenta del pasajero (usuarios.id). Se llena SOLO
+  // desde req.user.userId del JWT, nunca desde datos del frontend. Si la compra
+  // fue anónima (ventanilla/chofer) queda null y no genera notificaciones.
+  @Column({ type: 'uuid', nullable: true })
+  pasajeroUsuarioId: string | null;
+
   @Column({ nullable: true })
   codigo: string;
 

@@ -15,9 +15,11 @@ export interface Vehiculo {
   capacidadTotal?: number;
   estadoVehiculo?: string;
   estadoViaje?: string;
+  salidaProgramada?: string | null;
   asientosLibres?: number;
   ocupadosTotal?: number;
   asientosChofer?: number[];
+  configuracionAsientos?: { ancho: number; filas: (number | null)[][] } | null;
   pasajeros?: number;
   viajeActual?: {
     origen?: string;

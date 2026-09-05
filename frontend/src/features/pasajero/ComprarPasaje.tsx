@@ -4,17 +4,10 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { obtenerVehiculos } from "../../api/flota.api";
 import { registrarVenta } from "../../api/pasajes.api";
 import type { Vehiculo } from "../../types/vehiculo";
+import DistribucionAsientos from "../../components/DistribucionAsientos";
 import { Car, CheckCircle, AlertCircle, QrCode, ArrowLeft, ArrowRight, User, Share2 } from "lucide-react";
 
 type Paso = 1 | 2 | 3 | 4 | 5;
-
-function generarFilas(capacidadTotal: number): number[][] {
-  const filas: number[][] = [];
-  for (let i = 1; i <= capacidadTotal; i += 3) {
-    filas.push([i, i + 1, i + 2].filter((n) => n <= capacidadTotal));
-  }
-  return filas;
-}
 
 export default function ComprarPasaje() {
   const { usuario } = useAuth();
@@ -46,14 +39,22 @@ export default function ComprarPasaje() {
   const disponibles = vehiculos.filter((v) => v.paradaActual === tramo);
 
   const capacidadAsientos = Math.max(4, vehiculoSeleccionado?.capacidadTotal || 12);
-  const asientosPorFila = generarFilas(capacidadAsientos);
-  const asientosBloqueados = [1, 2];
+  const asientosChofer = vehiculoSeleccionado?.asientosChofer || [];
+  const configAsientos = (() => {
+    const cfg = vehiculoSeleccionado?.configuracionAsientos;
+    if (cfg && Array.isArray(cfg.filas) && cfg.filas.length > 0) return cfg;
+    const filas: (number | null)[][] = [];
+    for (let i = 1; i <= capacidadAsientos; i += 3) {
+      filas.push([i, i + 1, i + 2].filter((n) => n <= capacidadAsientos));
+    }
+    return { ancho: 3, filas };
+  })();
   const ocupados = vehiculoSeleccionado?.asientosOcupados || [];
   const precioUnitario = 5;
   const precioTotal = asientosSeleccionados.length * precioUnitario;
 
   function toggleAsiento(num: number) {
-    if (ocupados.includes(num) || asientosBloqueados.includes(num)) return;
+    if (ocupados.includes(num) || asientosChofer.includes(num)) return;
     setAsientosSeleccionados((prev) => {
       const nuevos = prev.includes(num) ? prev.filter((a) => a !== num) : [...prev, num];
       const nuevosPasajeros: Record<number, string> = {};
@@ -219,7 +220,19 @@ export default function ComprarPasaje() {
             </div>
           ) : (
             disponibles.map((v) => {
-              const libres = (v.capacidadTotal || 12) - 2 - (v.asientosOcupados?.length || 0);
+              const libres = (() => {
+                const cap = v.capacidadTotal || 12;
+                let vendibles = 0;
+                if (v.configuracionAsientos && Array.isArray(v.configuracionAsientos.filas)) {
+                  vendibles = v.configuracionAsientos.filas
+                    .flat()
+                    .filter((c): c is number => typeof c === "number").length;
+                } else {
+                  vendibles = cap;
+                }
+                vendibles -= (v.asientosChofer?.length || 0);
+                return Math.max(0, vendibles - (v.asientosOcupados?.length || 0));
+              })();
               return (
                 <button key={v.id} onClick={() => { setVehiculoSeleccionado(v); setPaso(3); }}
                   className="w-full bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center justify-between hover:border-sky-500/50 transition-all text-left cursor-pointer">
@@ -244,38 +257,19 @@ export default function ComprarPasaje() {
         <div className="space-y-4">
           <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
             <h2 className="font-semibold text-white mb-3 flex items-center gap-2"><Car className="w-5 h-5 text-sky-400" /> Seleccionar asientos - {vehiculoSeleccionado.placa}</h2>
-            <div className="flex flex-col items-center gap-1.5 max-w-xs mx-auto">
-              <div className="bg-gray-700 rounded-t-xl w-full py-1.5 text-center text-[10px] text-gray-400 font-medium">FRENTE</div>
-              {asientosPorFila.map((fila, filaIdx) => (
-                <div key={filaIdx} className="flex justify-center gap-1.5">
-                  {fila.map((num) => {
-                    const esChofer = num === 1;
-                    const bloqueado = asientosBloqueados.includes(num);
-                    const ocupado = ocupados.includes(num);
-                    const seleccionado = asientosSeleccionados.includes(num);
-                    return (
-                      <button key={num} onClick={() => toggleAsiento(num)} disabled={ocupado || bloqueado}
-                        className={`w-12 h-12 rounded-lg text-xs font-medium transition-all cursor-pointer flex flex-col items-center justify-center ${
-                          esChofer ? "bg-amber-600/30 text-amber-400 cursor-not-allowed border border-amber-600/30"
-                          : bloqueado ? "bg-gray-700/50 text-gray-600 cursor-not-allowed border border-gray-700"
-                          : ocupado ? "bg-red-600/20 text-red-400 cursor-not-allowed border border-red-600/20"
-                          : seleccionado ? "bg-sky-600 text-white ring-2 ring-sky-400"
-                          : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white border border-gray-700"
-                        }`}>
-                        <span className="text-[10px] leading-none">{num}</span>
-                        {esChofer && <span className="text-[7px] leading-none mt-0.5">CHOFER</span>}
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
+            <DistribucionAsientos
+              config={configAsientos}
+              asientosChofer={asientosChofer}
+              asientosOcupados={ocupados}
+              seleccionados={asientosSeleccionados}
+              onSeleccionar={(num) => toggleAsiento(num)}
+            />
             <div className="flex flex-wrap gap-3 text-[11px] text-gray-500 mt-4 justify-center">
               <span className="flex items-center gap-1"><span className="w-3 h-3 bg-amber-600/30 rounded border border-amber-600/30" /> Chofer</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-3 bg-gray-700/50 rounded border border-gray-700" /> Bloqueado</span>
               <span className="flex items-center gap-1"><span className="w-3 h-3 bg-gray-800 rounded border border-gray-700" /> Disponible</span>
               <span className="flex items-center gap-1"><span className="w-3 h-3 bg-sky-600 rounded" /> Seleccionado</span>
               <span className="flex items-center gap-1"><span className="w-3 h-3 bg-red-600/30 rounded border border-red-600/20" /> Ocupado</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-3 bg-gray-900 rounded border border-dashed border-gray-700" /> Espacio</span>
             </div>
             {asientosSeleccionados.length > 0 && (
               <p className="text-xs text-sky-400 mt-2 text-center">{asientosSeleccionados.length} asiento{asientosSeleccionados.length > 1 ? "s" : ""} seleccionado{asientosSeleccionados.length > 1 ? "s" : ""}</p>

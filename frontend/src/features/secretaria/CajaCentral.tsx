@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { obtenerCajaSecretaria, type CajaSecretaria } from "../../api/secretaria.api";
 import { obtenerPasajes } from "../../api/pasajes.api";
 import type { Pasaje } from "../../types/pasaje";
+import { toMoneyNumber, formatBs } from "../../utils/formatMoney";
 import { DollarSign, Ticket, Package, TrendingUp, Search, Filter } from "lucide-react";
 
 export default function CajaCentral() {
@@ -40,12 +41,19 @@ export default function CajaCentral() {
     !filtroPlaca || p.placaVehiculo?.toLowerCase().includes(filtroPlaca.toLowerCase())
   );
 
+  // Suma NUMÉRICA: montoTotal llega como string ("20.00") desde el historial raw;
+  // toMoneyNumber lo convierte a number antes de sumar (jamás concatenación).
+  const totalFiltrado = filtrados.reduce(
+    (total, p) => total + toMoneyNumber(p.montoTotal),
+    0,
+  );
+
   const items = [
     { label: "Boletos vendidos", value: caja.totalBoletosEmitidos, icon: Ticket, color: "text-sky-400 bg-sky-400/10" },
     { label: "Ventas", value: caja.totalVentas, icon: Filter, color: "text-cyan-400 bg-cyan-400/10" },
-    { label: "Pasajes", value: `Bs ${caja.subtotalAsientos}`, icon: DollarSign, color: "text-emerald-400 bg-emerald-400/10" },
-    { label: "Encomiendas", value: `Bs ${caja.subtotalEncomiendas}`, icon: Package, color: "text-amber-400 bg-amber-400/10" },
-    { label: "TOTAL CAJA", value: `Bs ${caja.montoTotalCaja}`, icon: TrendingUp, color: "text-green-400 bg-green-400/10" },
+    { label: "Pasajes", value: formatBs(caja.subtotalAsientos), icon: DollarSign, color: "text-emerald-400 bg-emerald-400/10" },
+    { label: "Encomiendas", value: formatBs(caja.subtotalEncomiendas), icon: Package, color: "text-amber-400 bg-amber-400/10" },
+    { label: "TOTAL CAJA", value: formatBs(caja.montoTotalCaja), icon: TrendingUp, color: "text-green-400 bg-green-400/10" },
   ];
 
   return (
@@ -98,7 +106,7 @@ export default function CajaCentral() {
                 />
               </div>
               <span className="flex items-center text-sm text-gray-400">
-                Total filtrado: <span className="text-green-400 font-semibold ml-1">Bs {filtrados.reduce((a, p) => a + (p.montoTotal || 0), 0)}</span>
+                Total filtrado: <span className="text-green-400 font-semibold ml-1">{formatBs(totalFiltrado)}</span>
               </span>
             </div>
 

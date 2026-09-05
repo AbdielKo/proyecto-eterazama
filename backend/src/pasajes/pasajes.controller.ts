@@ -5,6 +5,7 @@ import { RegistrarVentaDto } from './dto/registrar-venta.dto';
 import { SolicitarCancelacionDto } from './dto/solicitar-cancelacion.dto';
 import { PdfService } from './pdf.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/optional-jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { ROLES } from '../auth/roles';
@@ -16,9 +17,15 @@ export class PasajesController {
     private readonly pdfService: PdfService,
   ) {}
 
+  // Venta pública. Si el comprador está autenticado (JWT opcional), el pasaje
+  // se vincula a su cuenta (req.user.userId) y se le notifica la compra.
   @Post('venta')
-  registrarVenta(@Body() body: RegistrarVentaDto) {
-    return this.pasajesService.registrarVenta(body);
+  @UseGuards(OptionalJwtAuthGuard)
+  registrarVenta(@Body() body: RegistrarVentaDto, @Req() req: Request) {
+    return this.pasajesService.registrarVenta(
+      body,
+      (req.user as { userId?: string } | undefined)?.userId,
+    );
   }
 
   @Get('historial')
@@ -33,9 +40,13 @@ export class PasajesController {
   solicitarCancelacion(
     @Param('id') id: string,
     @Body() body: SolicitarCancelacionDto,
-    @Req() _req: Request,
+    @Req() req: Request,
   ) {
-    return this.pasajesService.solicitarCancelacion(id, body?.motivo);
+    return this.pasajesService.solicitarCancelacion(
+      id,
+      body?.motivo,
+      (req.user as { userId?: string } | undefined)?.userId,
+    );
   }
 
   @Get('hoy')

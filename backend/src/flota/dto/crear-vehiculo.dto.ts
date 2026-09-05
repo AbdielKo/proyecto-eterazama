@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsNumber } from 'class-validator';
+import { IsString, IsOptional, IsNumber, IsArray, IsInt } from 'class-validator';
 
 export class CrearVehiculoDto {
   @IsString()
@@ -31,4 +31,13 @@ export class CrearVehiculoDto {
 
   @IsNumber()
   capacidadTotal: number;
+
+  @IsOptional()
+  @IsArray()
+  filas?: (number | null)[][];
+
+  @IsOptional()
+  @IsArray()
+  @IsInt({ each: true })
+  asientosChofer?: number[];
 }

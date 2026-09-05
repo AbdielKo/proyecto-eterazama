@@ -5,9 +5,10 @@ import {
 } from '@nestjs/common';
 
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Between } from 'typeorm';
+import { DataSource, Repository, Between, EntityManager } from 'typeorm';
 
 import { Vehiculo } from '../flota/vehiculo.entity';
+import { SolicitudRetiro } from '../flota/solicitud-retiro.entity';
 import { Viaje } from './entities/viaje.entity';
 import { Boleto } from './entities/boleto.entity';
 import { NotificacionChofer } from './entities/notificacion.entity';
@@ -16,6 +17,14 @@ import { Pasaje } from '../pasajes/pasaje.entity';
 import { Review } from '../reviews/review.entity';
 import { Usuario } from '../auth/usuario.entity';
 import { FlotaGateway } from '../flota/flota.gateway';
+import { normalizarConfiguracionAsientos, obtenerAsientosDistribuidos } from '../flota/asientos-config.util';
+import { ROLES } from '../auth/roles';
+import { SalidasService } from '../salidas/salidas.service';
+import {
+  reindexarFilaOficial,
+  obtenerSiguientePuesto,
+  calcularPuestosFila,
+} from '../flota/fila.util';
 
 const NOMBRES_PARADAS: Record<string, string> = {
   cochabamba: 'Cochabamba',
@@ -28,6 +37,8 @@ export class ChoferService {
   constructor(
     @InjectRepository(Vehiculo)
     private readonly vehiculoRepo: Repository<Vehiculo>,
+
+    private readonly dataSource: DataSource,
 
     private readonly flotaGateway: FlotaGateway,
 
@@ -51,6 +62,11 @@ export class ChoferService {
 
     @InjectRepository(Usuario)
     private readonly usuarioRepo: Repository<Usuario>,
+
+    @InjectRepository(SolicitudRetiro)
+    private readonly solicitudRetiroRepo: Repository<SolicitudRetiro>,
+
+    private readonly salidasService: SalidasService,
   ) {}
 
 
@@ -71,6 +87,7 @@ export class ChoferService {
     if (!placa) {
       return {
         nombre: usuario.nombre || usuario.nombreUsuario,
+        estadoServicio: usuario.estado,
         vehiculo: null,
         placa: null,
         paradaActual: null,
@@ -96,23 +113,235 @@ export class ChoferService {
       where: { vehiculoId: vehiculo?.id || 0 },
     });
 
+    const asientosChofer = this.obtenerAsientosChofer(vehiculo);
+    const ocupados = vehiculo?.asientosOcupados?.length || 0;
+    const capacidad = vehiculo?.capacidadTotal || 12;
+    const config = normalizarConfiguracionAsientos(
+      vehiculo?.configuracionAsientos,
+      capacidad,
+    );
+    const configuracionPendiente = asientosChofer.length === 0 || !vehiculo?.configuracionAsientos;
+    const vendibles = obtenerAsientosDistribuidos(config).length;
+
     const promedio = reviews.length > 0
       ? Number((reviews.reduce((acc, r) => acc + r.estrellas, 0) / reviews.length).toFixed(2))
       : 0;
 
+    // FUENTE ÚNICA: pasajeros actuales = solo si el vehículo está operativo
+    // (en fila puesto 1 o en ruta). NO se usa pasajes.length (histórico).
+    const pasajerosCount = this.pasajerosActualesChofer(vehiculo, ocupados);
+
     return {
       nombre: usuario.nombre || usuario.nombreUsuario,
+      estadoServicio: usuario.estado,
       vehiculo: vehiculo ? `${vehiculo.tipoVehiculo} ${vehiculo.color}` : null,
       placa,
       paradaActual: vehiculo?.paradaActual || null,
       puestoFila: vehiculo?.puestoFila || null,
       estadoVehiculo: vehiculo?.estadoVehiculo || 'inactivo',
       estadoViaje: vehiculo?.estadoViaje || 'listo',
-      pasajerosCount: pasajes.length,
-      asientosOcupados: vehiculo?.asientosOcupados?.length || 0,
-      asientosDisponibles: (vehiculo?.capacidadTotal || 12) - 2 - (vehiculo?.asientosOcupados?.length || 0),
+      asientosChofer,
+      configuracionPendiente,
+      pasajerosCount,
+      asientosOcupados: pasajerosCount,
+      asientosDisponibles: Math.max(0, vendibles - asientosChofer.length - pasajerosCount),
       calificacionPromedio: promedio,
     };
+  }
+
+  private obtenerAsientosChofer(vehiculo: Vehiculo | null): number[] {
+    return vehiculo?.asientosChofer || [];
+  }
+
+  // FUENTE ÚNICA DE VERDAD para "pasajeros actuales" del chofer.
+  // Un vehículo tiene pasajeros actuales SOLO si:
+  //   - Está en fila como puesto 1 (recibiendo ventas), O
+  //   - Está EN RUTA
+  // En cualquier otro caso: 0 pasajeros actuales.
+  // NO borra historial, NO modifica boletos/pasajes/viajes.
+  private pasajerosActualesChofer(vehiculo: Vehiculo | null, ocupados: number): number {
+    if (!vehiculo) return 0;
+    if (vehiculo.estadoVehiculo === 'inactivo') return 0;
+    if (vehiculo.estadoViaje === 'mantenimiento') return 0;
+    if (vehiculo.paradaActual === 'fuera_de_fila' && vehiculo.estadoViaje !== 'en_ruta') return 0;
+    if (
+      (vehiculo.paradaActual === 'cochabamba' || vehiculo.paradaActual === 'eterazama') &&
+      vehiculo.puestoFila !== 1
+    ) return 0;
+    if (vehiculo.estadoViaje === 'por_salir') return 0;
+    return ocupados;
+  }
+
+  // =============================================
+  // 1.1 CAMBIAR ESTADO DE SERVICIO DEL CHOFER
+  // El chofer activa/desactiva SU PROPIO estado (autenticado por JWT).
+  //   - Activar: requiere rol=chofer, no estar bloqueado y tener un
+  //     vehículo asignado y existente en la flota.
+  //   - Desactivar: bloqueado si hay operación activa (en fila, en ruta,
+  //     pasajeros a bordo, viaje activo, solicitud de retiro pendiente).
+  // =============================================
+
+  async cambiarEstadoServicio(choferId: string, estado: string) {
+    if (estado !== 'activo' && estado !== 'inactivo') {
+      throw new BadRequestException(
+        'Estado inválido. Debe ser "activo" o "inactivo".',
+      );
+    }
+
+    const usuario = await this.usuarioRepo.findOne({
+      where: { id: choferId },
+    });
+    if (!usuario) {
+      throw new NotFoundException('Usuario no encontrado');
+    }
+    if (usuario.rol !== ROLES.CHOFER) {
+      throw new BadRequestException(
+        'Solo un chofer puede cambiar su estado de servicio.',
+      );
+    }
+
+    const destino = estado === 'activo' ? 'activo' : 'inactivo';
+
+    if (destino === 'activo') {
+      if (usuario.estado === 'bloqueado') {
+        throw new BadRequestException(
+          'Tu cuenta está bloqueada. No puedes activar tu estado de servicio.',
+        );
+      }
+      if (!usuario.placaAsignada) {
+        throw new BadRequestException(
+          'No tienes un vehículo asignado. La secretaría debe asignarte uno antes de que puedas activar tu estado.',
+        );
+      }
+      const vehiculo = await this.vehiculoRepo.findOne({
+        where: { placa: usuario.placaAsignada },
+      });
+      if (!vehiculo) {
+        throw new BadRequestException(
+          'El vehículo asignado no existe en la flota. Contacta a la secretaría.',
+        );
+      }
+    } else {
+      // DESACTIVAR: el chofer pasa a INACTIVO. Reglas de negocio:
+      //   - No puede estar EN RUTA ni en MANTENIMIENTO.
+      //   - Si ocupa el puesto 1 de la fila y ya tiene pasajeros/asientos
+      //     vendidos a bordo, NO se destruye la venta: se bloquea para que
+      //     finalice/use la opción de retiro y la secretaría transfiera.
+      //   - Si está ANOTADO en una fila pero SIN pasajeros vendidos, se le
+      //     permite desactivar y el sistema lo saca automáticamente de la
+      //     fila (puesto 0) y lo lleva a FUERA DE FILA.
+      const vehiculo = usuario.placaAsignada
+        ? await this.vehiculoRepo.findOne({
+            where: { placa: usuario.placaAsignada },
+          })
+        : null;
+      if (vehiculo) {
+        const asientosChoferSet = new Set(vehiculo.asientosChofer || []);
+        const pasajerosVendidos = (vehiculo.asientosOcupados || []).filter(
+          (a) => !asientosChoferSet.has(a),
+        ).length;
+
+        if (vehiculo.estadoViaje === 'en_ruta') {
+          throw new BadRequestException(
+            'No puedes desactivar tu estado mientras te encuentres EN RUTA. Finaliza el recorrido primero.',
+          );
+        }
+        if (vehiculo.estadoViaje === 'mantenimiento') {
+          throw new BadRequestException(
+            'No puedes desactivar tu estado mientras estés en mantenimiento.',
+          );
+        }
+        // Protección de ventas: puesto 1 con pasajeros vendidos en la fila.
+        if (
+          (vehiculo.paradaActual === 'cochabamba' ||
+            vehiculo.paradaActual === 'eterazama') &&
+          vehiculo.puestoFila === 1 &&
+          pasajerosVendidos > 0
+        ) {
+          throw new BadRequestException(
+            'No puedes desactivar tu estado porque eres el puesto 1 y ya tienes pasajeros/asientos vendidos. Finaliza la ruta o usa la opción "Solicitar retiro de la fila" para que la secretaría transfiera tus pasajeros.',
+          );
+        }
+      }
+      const viajeActivo = usuario.placaAsignada
+        ? await this.viajeRepo.findOne({
+            where: {
+              placaVehiculo: usuario.placaAsignada,
+              estado: 'en_ruta',
+            },
+          })
+        : null;
+      if (viajeActivo) {
+        throw new BadRequestException(
+          'No puedes desactivar tu estado mientras tengas un viaje activo. Finaliza el viaje primero.',
+        );
+      }
+      const retiroPendiente = await this.solicitudRetiroRepo.findOne({
+        where: { choferId, estado: 'PENDIENTE' },
+      });
+      if (retiroPendiente) {
+        throw new BadRequestException(
+          'No puedes desactivar tu estado mientras tengas una solicitud de retiro pendiente de aprobación.',
+        );
+      }
+    }
+
+    usuario.estado = destino;
+    const guardado = await this.usuarioRepo.save(usuario);
+
+    // Sincronizar el estado del VEHÍCULO con la única fuente de verdad del
+    // estado de servicio del chofer (usuario.estado) para que Inicio, Mi Fila,
+    // Secretaría y Boletería siempre vean el MISMO estado.
+    if (usuario.placaAsignada) {
+      const vehiculo = await this.vehiculoRepo.findOne({
+        where: { placa: usuario.placaAsignada },
+      });
+      if (vehiculo) {
+        if (destino === 'inactivo') {
+          // Fuera de servicio: sin fila, sin puesto, sin ubicación y sin
+          // asientos de pasajeros activos. El historial queda intacto.
+          await this.sacarDeFila(vehiculo);
+          vehiculo.paradaActual = 'fuera_de_fila';
+          vehiculo.puestoFila = 0;
+          vehiculo.horaIngresoFila = null;
+          vehiculo.estadoViaje = 'listo';
+          vehiculo.estadoVehiculo = 'inactivo';
+          vehiculo.asientosOcupados = this.asientosFinalizados(vehiculo);
+          vehiculo.fechaEstado = new Date();
+          await this.vehiculoRepo.save(vehiculo);
+        } else {
+          // Reactivar: el vehículo vuelve a ACTIVO y queda listo, pero NO se
+          // anota automáticamente en ninguna fila (entrada voluntaria).
+          vehiculo.estadoVehiculo = 'activo';
+          if (vehiculo.estadoViaje === 'mantenimiento' || vehiculo.estadoViaje === 'fin_de_ruta') {
+            vehiculo.estadoViaje = 'listo';
+          }
+          vehiculo.fechaEstado = new Date();
+          await this.vehiculoRepo.save(vehiculo);
+        }
+        this.flotaGateway.notificarCambioFlota();
+      }
+    }
+
+    return {
+      id: guardado.id,
+      estado: guardado.estado,
+      mensaje:
+        destino === 'activo'
+          ? 'Estado de servicio activado correctamente.'
+          : 'Estado de servicio desactivado correctamente.',
+    };
+  }
+
+  // Calcula los asientos que deben quedar OCUPADOS después de finalizar un
+  // viaje: únicamente los asientos del chofer configurados (asientosChofer),
+  // sin inventar ningún fallback como [1,2]. Si el vehículo no tiene
+  // configuración de chofer, el resultado es [].
+  private asientosFinalizados(vehiculo: Vehiculo | null): number[] {
+    if (!vehiculo) return [];
+    return Array.from(
+      new Set((vehiculo.asientosChofer || []).map(Number)),
+    ).filter((n) => Number.isInteger(n) && n >= 1).sort((a, b) => a - b);
   }
 
 
@@ -138,9 +367,13 @@ export class ChoferService {
     }
 
     const capacidad = Math.max(4, vehiculo.capacidadTotal || 12);
-    const ocupadosTotal = (vehiculo.asientosOcupados || []).filter(
-      (a) => a >= 3 && a <= capacidad,
+    const asientosChofer = this.obtenerAsientosChofer(vehiculo);
+    const ocupadosRaw = (vehiculo.asientosOcupados || []).filter(
+      (a) => a >= 1 && a <= capacidad && !asientosChofer.includes(a),
     ).length;
+
+    // FUENTE ÚNICA: pasajeros actuales solo si el vehículo está operativo
+    const ocupadosTotal = this.pasajerosActualesChofer(vehiculo, ocupadosRaw);
 
     // Informacion real de pasajeros por asiento (misma fuente que Secretaria:
     // la tabla pasajes de PostgreSQL). Sin datos privados innecesarios.
@@ -192,8 +425,8 @@ export class ChoferService {
     }[] = [];
 
     for (let i = 1; i <= capacidad; i++) {
-      // Asientos 1-2 siempre son del chofer (regla compartida con Secretaria)
-      if (i <= 2) {
+      // Los asientos reservados para el chofer (configurables por la secretaría)
+      if (asientosChofer.includes(i)) {
         mapaAsientos.push({ numero: i, estado: 'chofer', pasajero: null, estadoPasaje: null });
         continue;
       }
@@ -227,8 +460,19 @@ export class ChoferService {
       horaIngresoFila: vehiculo.horaIngresoFila,
       fechaEstado: vehiculo.fechaEstado,
       asientosOcupados: vehiculo.asientosOcupados,
+      asientosChofer,
+      configuracionPendiente: asientosChofer.length === 0 || !vehiculo.configuracionAsientos,
+      configuracionAsientos: normalizarConfiguracionAsientos(
+        vehiculo.configuracionAsientos,
+        capacidad,
+      ),
       ocupadosTotal: ocupadosTotal,
-      asientosLibres: Math.max(0, capacidad - 2 - ocupadosTotal),
+      asientosLibres: Math.max(
+        0,
+        obtenerAsientosDistribuidos(
+          normalizarConfiguracionAsientos(vehiculo.configuracionAsientos, capacidad),
+        ).length - asientosChofer.length - ocupadosTotal,
+      ),
       mapaAsientos,
     };
   }
@@ -255,46 +499,113 @@ export class ChoferService {
       throw new NotFoundException('Vehiculo no encontrado');
     }
 
+    // Lazy-check: si la cuenta regresiva de un "por salir" ya venció, el backend
+    // lo transiciona a EN RUTA aquí mismo (además del temporizador de 15 s),
+    // para que esta respuesta sea consistente de inmediato.
+    await this.salidasService.procesarSalidasPendientes();
+
     const todosVehiculos = await this.vehiculoRepo.find({
       order: { puestoFila: 'ASC' },
     });
 
-    const resumir = (lista: Vehiculo[]) => lista.map(v => ({
-      placa: v.placa,
-      tipoVehiculo: v.tipoVehiculo,
-      color: v.color,
-      puestoFila: v.puestoFila,
-      choferNombre: v.choferNombre,
-      choferCi: v.choferCi,
-      estado: v.estadoVehiculo,
-      horaIngresoFila: v.horaIngresoFila,
-    }));
+    // La fila solo contiene choferes OFICIALES (usuario con rol=chofer y
+    // vehículo asignado) y ACTIVOS. Los vehículos sin chofer oficial asociado
+    // (huérfanos) y los de choferes INACTIVOS no se muestran en la fila.
+    const choferesOficiales = await this.usuarioRepo.find({
+      where: { rol: ROLES.CHOFER, estado: 'activo' },
+      select: { placaAsignada: true },
+    });
+    const placasOficiales = new Set(
+      choferesOficiales
+        .map((c) => c.placaAsignada)
+        .filter((p): p is string => !!p),
+    );
+    const vehiculosOficiales = todosVehiculos.filter((v) =>
+      placasOficiales.has(v.placa),
+    );
 
-    const cochabamba = resumir(todosVehiculos.filter(v => v.paradaActual === 'cochabamba'));
-    const eterazama = resumir(todosVehiculos.filter(v => v.paradaActual === 'eterazama'));
-    const enRuta = resumir(todosVehiculos.filter(v => v.paradaActual === 'en_ruta'));
-    const fueraDeFila = resumir(todosVehiculos.filter(v => v.paradaActual === 'fuera_de_fila'));
+    // Posición REAL y ACTUAL calculada con el MISMO criterio oficial que
+    // reindexa PostgreSQL (fuente de verdad): solo choferes oficiales activos,
+    // sin por_salir/en_ruta/mantenimiento. Nunca se expone un valor histórico.
+    // Un vehículo único en su parada SIEMPRE ocupa el puesto 1 aunque su
+    // puestoFila persistido haya quedado desplazado.
+    const puestosReales = new Map<string, number>();
+    for (const parada of ['cochabamba', 'eterazama']) {
+      for (const [placa, puesto] of calcularPuestosFila(
+        todosVehiculos,
+        parada,
+        placasOficiales,
+      )) {
+        puestosReales.set(placa, puesto);
+      }
+    }
 
-    const miFila = todosVehiculos
-      .filter(v => v.paradaActual === vehiculo.paradaActual && (vehiculo.paradaActual === 'cochabamba' || vehiculo.paradaActual === 'eterazama'))
-      .map(v => v.placa);
+    const resumir = (lista: Vehiculo[]) => lista.map(v => {
+      const choferSet = new Set(v.asientosChofer || []);
+      const ocupadosRaw = (v.asientosOcupados || []).filter((a) => !choferSet.has(a)).length;
+      // FUENTE ÚNICA: pasajeros actuales solo si el vehículo está operativo
+      const pasajeros = this.pasajerosActualesChofer(v, ocupadosRaw);
+      return {
+        placa: v.placa,
+        tipoVehiculo: v.tipoVehiculo,
+        color: v.color,
+        puestoFila: puestosReales.get(v.placa) ?? v.puestoFila,
+        choferNombre: v.choferNombre,
+        choferCi: v.choferCi,
+        estado: v.estadoVehiculo,
+        estadoViaje: v.estadoViaje,
+        salidaProgramada: v.salidaProgramada,
+        horaIngresoFila: v.horaIngresoFila,
+        pasajeros,
+      };
+    });
 
-    const miPosicion = miFila.indexOf(vehiculo.placa);
+    // Vehículos que NO ocupan puesto numerado en la fila: los no anotados
+    // (puestoFila = 0, solo ubicados en el sector) y los por_salir/en_ruta/
+    // mantenimiento (se muestran en sus propias secciones).
+    const noOcupaPuesto = (v: Vehiculo) =>
+      (v.puestoFila || 0) <= 0 ||
+      v.estadoViaje === 'por_salir' ||
+      v.estadoViaje === 'en_ruta' ||
+      v.paradaActual === 'en_ruta' ||
+      v.estadoViaje === 'mantenimiento';
+
+    const cochabamba = resumir(vehiculosOficiales.filter(v => v.paradaActual === 'cochabamba' && !noOcupaPuesto(v)));
+    const eterazama = resumir(vehiculosOficiales.filter(v => v.paradaActual === 'eterazama' && !noOcupaPuesto(v)));
+    const porSalir = resumir(vehiculosOficiales.filter(v => v.estadoViaje === 'por_salir'));
+    const enRuta = resumir(vehiculosOficiales.filter(v => v.estadoViaje === 'en_ruta' || v.paradaActual === 'en_ruta'));
+    const fueraDeFila = resumir(vehiculosOficiales.filter(v => v.paradaActual === 'fuera_de_fila' && v.estadoViaje !== 'en_ruta'));
+
+    // ANOTADO en una fila: ubicado en un sector Y ocupando un puesto numerado.
+    const anotadoEnFila =
+      (vehiculo.paradaActual === 'cochabamba' || vehiculo.paradaActual === 'eterazama') &&
+      (vehiculo.puestoFila || 0) > 0;
+    const miLista = anotadoEnFila
+      ? vehiculo.paradaActual === 'cochabamba'
+        ? cochabamba
+        : eterazama
+      : [];
+    const miPosicion = anotadoEnFila
+      ? miLista.findIndex((v) => v.placa === vehiculo.placa)
+      : -1;
 
     return {
+      ubicacion: vehiculo.paradaActual,
       paradaActual: vehiculo.paradaActual,
-      yaRegistrado: vehiculo.paradaActual === 'cochabamba' || vehiculo.paradaActual === 'eterazama',
-      miPuesto: vehiculo.puestoFila,
+      yaRegistrado: anotadoEnFila,
+      miPuesto: miPosicion >= 0 ? miPosicion + 1 : 0,
       posicionEnFila: miPosicion >= 0 ? miPosicion + 1 : 0,
-      totalEnFila: vehiculo.paradaActual === 'cochabamba' ? cochabamba.length : eterazama.length,
+      totalEnFila: miLista.length,
       estadoVehiculo: vehiculo.estadoVehiculo,
       estadoViaje: vehiculo.estadoViaje,
+      salidaProgramada: vehiculo.salidaProgramada,
       cochabamba,
       eterazama,
+      porSalir,
       enRuta,
       fueraDeFila,
-      delante: miPosicion > 0 ? cochabamba.concat(eterazama).slice(0, miPosicion) : [],
-      detras: miPosicion >= 0 ? cochabamba.concat(eterazama).slice(miPosicion + 1) : [],
+      delante: miPosicion > 0 ? miLista.slice(0, miPosicion) : [],
+      detras: miPosicion >= 0 ? miLista.slice(miPosicion + 1) : [],
     };
   }
 
@@ -312,72 +623,131 @@ export class ChoferService {
       throw new NotFoundException('No tiene vehiculo asignado');
     }
 
-    const vehiculo = await this.vehiculoRepo.findOne({
-      where: { placa: usuario.placaAsignada },
-    });
-
-    if (!vehiculo) {
-      throw new NotFoundException('Vehiculo no encontrado');
-    }
-
-    if (vehiculo.estadoVehiculo !== 'activo') {
-      throw new BadRequestException('El vehiculo se encuentra inactivo y no puede anotarse en la fila');
-    }
-
-    if (vehiculo.estadoViaje === 'mantenimiento') {
-      throw new BadRequestException('El vehiculo se encuentra en mantenimiento y no puede anotarse en la fila');
-    }
-
-    if (vehiculo.estadoViaje === 'en_ruta') {
-      throw new BadRequestException('El vehiculo se encuentra EN RUTA y no puede anotarse en la fila hasta que termine el recorrido');
-    }
-
-    const nombreParada = parada === 'cochabamba' ? 'Cochabamba' : 'Eterazama';
-
-    if (vehiculo.paradaActual === parada) {
-      throw new BadRequestException(`Ya estas registrado en la fila de ${nombreParada}.`);
-    }
-
-    if (vehiculo.paradaActual === 'cochabamba' || vehiculo.paradaActual === 'eterazama') {
-      const otra = vehiculo.paradaActual === 'cochabamba' ? 'Cochabamba' : 'Eterazama';
+    // Regla de choferes activos: un chofer INACTIVO no puede anotarse en la
+    // fila. Debe activar su estado de servicio desde su panel primero.
+    if (usuario.estado !== 'activo') {
+      if (usuario.estado === 'bloqueado') {
+        throw new BadRequestException(
+          'Tu cuenta está bloqueada. No puedes anotarte en la fila.',
+        );
+      }
       throw new BadRequestException(
-        `Ya estas registrado en la fila de ${otra}. Solo puedes estar anotado en una fila a la vez. Sal de esa fila primero.`,
+        'No puedes ingresar a la fila porque tu estado de servicio está INACTIVO. Activa tu estado desde tu panel para poder anotarte en la fila.',
       );
     }
 
-    const mismaParada = await this.vehiculoRepo.find({
-      where: { paradaActual: parada },
-      order: { puestoFila: 'ASC' },
+    const placa = usuario.placaAsignada;
+    const nombreParada = parada === 'cochabamba' ? 'Cochabamba' : 'Eterazama';
+
+    // Placas de los choferes oficiales: solo esos ocupan puestos numerados.
+    const placasOficiales = await this.obtenerPlacasOficiales();
+
+    // Operación atómica y serializada: se toma un lock transaccional de
+    // PostgreSQL por parada para que dos "Anotarme en la fila" simultáneos NO
+    // puedan obtener el mismo puesto. Validación, asignación de puesto,
+    // reindexado y creación del viaje ocurren en la MISMA transacción.
+    const resultado = await this.dataSource.transaction(async (manager) => {
+      const vehiculoRepo = manager.getRepository(Vehiculo);
+
+      const lockKey = parada === 'cochabamba' ? 771001 : 771002;
+      await manager.query('SELECT pg_advisory_xact_lock($1)', [lockKey]);
+
+      const vehiculo = await vehiculoRepo.findOne({
+        where: { placa },
+        lock: { mode: 'pessimistic_write' },
+      });
+
+      if (!vehiculo) {
+        throw new NotFoundException('Vehiculo no encontrado');
+      }
+
+      // Un vehículo POR SALIR ya está comprometido con su partida: no puede
+      // anotarse en otra fila (apenas deja su parada actual, quedará EN RUTA).
+      if (vehiculo.estadoViaje === 'por_salir') {
+        throw new BadRequestException(
+          'El vehiculo está POR SALIR y no puede anotarse en otra fila.',
+        );
+      }
+
+      if (vehiculo.estadoVehiculo !== 'activo') {
+        throw new BadRequestException('El vehiculo se encuentra inactivo y no puede anotarse en la fila');
+      }
+
+      if (vehiculo.estadoViaje === 'mantenimiento') {
+        throw new BadRequestException('El vehiculo se encuentra en mantenimiento y no puede anotarse en la fila');
+      }
+
+      if (vehiculo.estadoViaje === 'en_ruta') {
+        throw new BadRequestException('El vehiculo se encuentra EN RUTA y no puede anotarse en la fila hasta que termine el recorrido');
+      }
+
+      // La anotación en la fila es VOLUNTARIA y solo puede hacerse si el
+      // chofer está ubicado (paradaActual) en el MISMO sector en el que desea
+      // anotarse. "Estar en la parada" no equivale a "estar anotado en la fila":
+      // primero se selecciona la ubicación y luego se anota explícitamente.
+      if (vehiculo.paradaActual !== parada) {
+        const miSector =
+          vehiculo.paradaActual === 'cochabamba'
+            ? 'Cochabamba'
+            : vehiculo.paradaActual === 'eterazama'
+            ? 'Eterazama'
+            : 'fuera de fila';
+        throw new BadRequestException(
+          `No puedes anotarte en la fila de ${nombreParada} porque tu ubicación actual es ${miSector}. Selecciona tu ubicación en ${nombreParada} y luego anótate.`,
+        );
+      }
+
+      // Ya anotado en la misma fila (ocupa un puesto numerado).
+      if ((vehiculo.puestoFila || 0) > 0) {
+        throw new BadRequestException(
+          `Ya estas anotado en la fila de ${nombreParada} en el puesto #${vehiculo.puestoFila}.`,
+        );
+      }
+
+      // El nuevo puesto es el siguiente de los vehículos oficiales que ocupan
+      // puesto (los "por salir" y en ruta NO ocupan puesto y no cuentan).
+      const nuevoPuesto = await obtenerSiguientePuesto(
+        vehiculoRepo,
+        parada,
+        placasOficiales,
+      );
+
+      // La ubicación (paradaActual) ya quedó fijada al sector; la anotación
+      // solo asigna el puesto numerado dentro de la fila de ese sector.
+      vehiculo.puestoFila = nuevoPuesto;
+      vehiculo.estadoViaje = 'listo';
+      vehiculo.estadoVehiculo = 'activo';
+      vehiculo.horaIngresoFila = new Date();
+      // Nuevo ciclo de operación: los asientos de PASAJEROS quedan disponibles
+      // para el nuevo viaje. Se conservan los asientos del chofer (sin fallback).
+      // El historial de boletos/pasajes/viajes anteriores NO se modifica.
+      vehiculo.asientosOcupados = this.asientosFinalizados(vehiculo);
+      await vehiculoRepo.save(vehiculo);
+
+      await this.reindexarFila(parada, manager, placasOficiales);
+      await this.iniciarNuevoViaje(vehiculo, parada, manager);
+
+      return {
+        paradaActual: vehiculo.paradaActual,
+        puestoFila: nuevoPuesto,
+        horaIngresoFila: vehiculo.horaIngresoFila,
+      };
     });
 
-    const nuevoPuesto = mismaParada.length > 0
-      ? Math.max(...mismaParada.map(v => v.puestoFila || 0)) + 1
-      : 1;
-
-    vehiculo.paradaActual = parada;
-    vehiculo.puestoFila = nuevoPuesto;
-    vehiculo.estadoViaje = 'listo';
-    vehiculo.estadoVehiculo = 'activo';
-    vehiculo.horaIngresoFila = new Date();
-    await this.vehiculoRepo.save(vehiculo);
-
-    await this.reindexarFila(parada);
-    await this.iniciarNuevoViaje(vehiculo, parada);
     this.flotaGateway.notificarCambioFlota();
 
     return {
-      paradaActual: vehiculo.paradaActual,
-      puestoFila: vehiculo.puestoFila,
-      horaIngresoFila: vehiculo.horaIngresoFila,
-      mensaje: `Te anotaste en la fila de ${nombreParada}, puesto #${nuevoPuesto}`,
+      ...resultado,
+      mensaje: `Te anotaste en la fila de ${nombreParada}, puesto #${resultado.puestoFila}`,
     };
   }
 
   // Al anotarse en la fila se inicia un nuevo viaje con los asientos de
   // pasajeros nuevamente disponibles (los 2 asientos del chofer se reservan).
   // No se elimina ni modifica el historial de viajes/pasajes anteriores.
-  private async iniciarNuevoViaje(vehiculo: Vehiculo, parada: string) {
-    const viajeAbierto = await this.viajeRepo.findOne({
+  private async iniciarNuevoViaje(vehiculo: Vehiculo, parada: string, manager?: EntityManager) {
+    const viajeRepo = manager ? manager.getRepository(Viaje) : this.viajeRepo;
+    const viajeAbierto = await viajeRepo.findOne({
       where: { placaVehiculo: vehiculo.placa },
       order: { fechaCreacion: 'DESC' },
     });
@@ -397,7 +767,7 @@ export class ChoferService {
       ? NOMBRES_PARADAS['eterazama']
       : NOMBRES_PARADAS['cochabamba'];
 
-    const nuevoViaje = this.viajeRepo.create({
+    const nuevoViaje = viajeRepo.create({
       placaVehiculo: vehiculo.placa,
       choferNombre: vehiculo.choferNombre,
       origen,
@@ -411,7 +781,7 @@ export class ChoferService {
       pasajerosTransportados: 0,
     });
 
-    await this.viajeRepo.save(nuevoViaje);
+    await viajeRepo.save(nuevoViaje);
   }
 
   async salirDeFila(choferId: string) {
@@ -423,6 +793,213 @@ export class ChoferService {
       throw new NotFoundException('No tiene vehiculo asignado');
     }
 
+    const placa = usuario.placaAsignada;
+
+    const resultado = await this.dataSource.transaction(async (manager) => {
+      const vehiculoRepo = manager.getRepository(Vehiculo);
+      const pasajeRepo = manager.getRepository(Pasaje);
+
+      // Leer la parada actual para tomar el lock transaccional de la fila y
+      // serializar la salida con una anotación simultánea.
+      let vehiculoRef = await vehiculoRepo.findOne({ where: { placa } });
+      if (!vehiculoRef) {
+        throw new NotFoundException('Vehiculo no encontrado');
+      }
+      const paradaRef = vehiculoRef.paradaActual;
+      if (paradaRef === 'cochabamba' || paradaRef === 'eterazama') {
+        const lockKey = paradaRef === 'cochabamba' ? 771001 : 771002;
+        await manager.query('SELECT pg_advisory_xact_lock($1)', [lockKey]);
+      }
+
+      const vehiculo = await vehiculoRepo.findOne({
+        where: { placa },
+        lock: { mode: 'pessimistic_write' },
+      });
+
+      if (!vehiculo) {
+        throw new NotFoundException('Vehiculo no encontrado');
+      }
+
+      if (vehiculo.paradaActual !== 'cochabamba' && vehiculo.paradaActual !== 'eterazama') {
+        throw new BadRequestException('No estas registrado en ninguna fila');
+      }
+
+      // Si el chofer ocupa el puesto 1 y ya tiene pasajeros/asientos vendidos,
+      // no puede retirarse directamente: debe solicitarlo y esperar la
+      // transferencia de pasajeros por parte de la secretaría.
+      if (vehiculo.puestoFila === 1) {
+        const pasajes = await pasajeRepo.find({
+          where: { placaVehiculo: placa },
+        });
+        const activos = pasajes.filter(
+          (p) =>
+            p.estadoBoleto === 'ACTIVO' &&
+            p.estadoReembolso !== 'REEMBOLSADO' &&
+            !p.fechaEscaneo,
+        );
+
+        if (activos.length > 0 || (vehiculo.asientosOcupados || []).length > 0) {
+          throw new BadRequestException(
+            'No puedes retirarte directamente porque eres el puesto 1 y ya tienes pasajeros/asientos vendidos. Usa la opción "Solicitar retiro de la fila" para que la secretaría transfiera tus pasajeros.',
+          );
+        }
+      }
+
+      const paradaSalida = vehiculo.paradaActual;
+
+      // Salir de la fila: el chofer deja de ocupar un puesto, pero CONSERVA su
+      // ubicación/sector (para el chofer, "estar en la parada" es distinto de
+      // "estar anotado en la fila"). Queda situado en su sector con puesto 0.
+      vehiculo.puestoFila = 0;
+      vehiculo.horaIngresoFila = null;
+      vehiculo.estadoViaje = 'listo';
+      // Al salir de fila: limpiar asientos de pasajeros. Los pasajes/viajes
+      // anteriores quedan en el historial de PostgreSQL sin borrar.
+      vehiculo.asientosOcupados = this.asientosFinalizados(vehiculo);
+      await vehiculoRepo.save(vehiculo);
+
+      await this.reindexarFila(paradaSalida, manager);
+
+      return { paradaActual: vehiculo.paradaActual };
+    });
+
+    this.flotaGateway.notificarCambioFlota();
+
+    return {
+      paradaActual: resultado.paradaActual,
+      mensaje: 'Saliste de la fila correctamente. Los puestos se reorganizaron.',
+    };
+  }
+
+  // =============================================
+  // 3.2 CAMBIAR UBICACIÓN / SECTOR DEL CHOFER
+  // =============================================
+  // El chofer indica manualmente en qué sector se encuentra (COCHABAMBA o
+  // ETERAZAMA). La ubicación es independiente de la fila: seleccionar un
+  // sector NO anota al chofer en la fila. Si el chofer estaba anotado en una
+  // fila de otro sector, se le saca automáticamente de esa fila (puesto 0,
+  // reindex) para evitar inconsistencias antes de cambiar de sector.
+  async cambiarUbicacion(choferId: string, ubicacion: string) {
+    const ubicaciones = ['cochabamba', 'eterazama'];
+    if (!ubicaciones.includes(ubicacion)) {
+      throw new BadRequestException(
+        'Ubicación no válida. Debe ser cochabamba o eterazama.',
+      );
+    }
+
+    const usuario = await this.usuarioRepo.findOne({
+      where: { id: choferId },
+    });
+    if (!usuario || !usuario.placaAsignada) {
+      throw new NotFoundException('No tiene vehiculo asignado');
+    }
+    if (usuario.estado !== 'activo') {
+      throw new BadRequestException(
+        'Tu estado de servicio está INACTIVO. Activa tu estado antes de indicar tu ubicación.',
+      );
+    }
+
+    const placa = usuario.placaAsignada;
+    const nombreUbicacion = ubicacion === 'cochabamba' ? 'Cochabamba' : 'Eterazama';
+
+    const resultado = await this.dataSource.transaction(async (manager) => {
+      const vehiculoRepo = manager.getRepository(Vehiculo);
+
+      const vehiculo = await vehiculoRepo.findOne({
+        where: { placa },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!vehiculo) {
+        throw new NotFoundException('Vehiculo no encontrado');
+      }
+
+      if (vehiculo.estadoViaje === 'en_ruta') {
+        throw new BadRequestException(
+          'No puedes cambiar tu ubicación mientras estés EN RUTA. Finaliza el recorrido primero.',
+        );
+      }
+
+      // Si está anotado en una fila de OTRO sector (o del mismo), al cambiar
+      // de ubicación sale de esa fila automáticamente (puesto 0 + reindex),
+      // para que nunca quede "ubicación = X" y "fila = Y" a la vez.
+      const anotadoEn =
+        (vehiculo.puestoFila || 0) > 0 &&
+        (vehiculo.paradaActual === 'cochabamba' ||
+          vehiculo.paradaActual === 'eterazama')
+          ? vehiculo.paradaActual
+          : null;
+      if (anotadoEn && anotadoEn !== ubicacion) {
+        const paradaAnterior = anotadoEn;
+        vehiculo.puestoFila = 0;
+        vehiculo.horaIngresoFila = null;
+        vehiculo.estadoViaje = 'listo';
+        vehiculo.asientosOcupados = this.asientosFinalizados(vehiculo);
+        await vehiculoRepo.save(vehiculo);
+        await this.reindexarFila(paradaAnterior, manager);
+      }
+
+      vehiculo.paradaActual = ubicacion;
+      vehiculo.fechaEstado = new Date();
+      // Cambiar de sector NO anota en la fila: queda situado con puesto 0.
+      vehiculo.puestoFila = 0;
+      vehiculo.horaIngresoFila = null;
+      vehiculo.estadoViaje = 'listo';
+      await vehiculoRepo.save(vehiculo);
+
+      return { paradaActual: vehiculo.paradaActual, puestoFila: vehiculo.puestoFila };
+    });
+
+    this.flotaGateway.notificarCambioFlota();
+
+    return {
+      ...resultado,
+      mensaje: `Tu ubicación actual se guardó correctamente en ${nombreUbicacion}. Para entrar a la fila, presiona "Anotarme en ${nombreUbicacion}".`,
+    };
+  }
+
+  private async reindexarFila(parada: string, manager?: EntityManager, placasOficiales?: Set<string>) {
+    const repo = manager ? manager.getRepository(Vehiculo) : this.vehiculoRepo;
+    const placas = placasOficiales ?? await this.obtenerPlacasOficiales();
+    await reindexarFilaOficial(repo, parada, placas);
+  }
+
+  // Placas de los choferes oficiales (rol=chofer, estado activo, con vehículo
+  // asignado). Es el criterio ÚNICO de quién ocupa un puesto numerado.
+  private async obtenerPlacasOficiales(): Promise<Set<string>> {
+    const choferes = await this.usuarioRepo.find({
+      where: { rol: ROLES.CHOFER, estado: 'activo' },
+      select: { placaAsignada: true },
+    });
+    return new Set(
+      choferes
+        .map((c) => c.placaAsignada)
+        .filter((p): p is string => !!p),
+    );
+  }
+
+
+  // =============================================
+  // 3.1 RETIRO VOLUNTARIO DE LA FILA
+  // =============================================
+  //
+  // El chofer solicita retirarse de la fila. Si es el puesto 1 y ya tiene
+  // pasajeros/asientos vendidos, la solicitud queda PENDIENTE y la secretaría
+  // transfiere los pasajeros al siguiente chofer (puesto 2) antes de aprobar.
+  // Si no tiene pasajeros, se aprueba automáticamente (retiro directo).
+
+  async solicitarRetiroFila(choferId: string, motivo: string) {
+    const usuario = await this.usuarioRepo.findOne({
+      where: { id: choferId },
+    });
+
+    if (!usuario || !usuario.placaAsignada) {
+      throw new NotFoundException('No tiene vehiculo asignado');
+    }
+
+    if (!motivo || !motivo.trim()) {
+      throw new BadRequestException('Debe indicar el motivo del retiro.');
+    }
+
     const vehiculo = await this.vehiculoRepo.findOne({
       where: { placa: usuario.placaAsignada },
     });
@@ -432,39 +1009,56 @@ export class ChoferService {
     }
 
     if (vehiculo.paradaActual !== 'cochabamba' && vehiculo.paradaActual !== 'eterazama') {
-      throw new BadRequestException('No estas registrado en ninguna fila');
+      throw new BadRequestException('No estas registrado en ninguna fila para solicitar un retiro.');
     }
 
-    const paradaSalida = vehiculo.paradaActual;
+    // No permitir dos solicitudes pendientes simultáneas
+    const pendiente = await this.solicitudRetiroRepo.findOne({
+      where: { choferId, estado: 'PENDIENTE' },
+    });
+    if (pendiente) {
+      throw new BadRequestException(
+        'Ya tienes una solicitud de retiro pendiente de aprobación por la secretaría.',
+      );
+    }
 
-    vehiculo.paradaActual = 'fuera_de_fila';
-    vehiculo.puestoFila = 0;
-    vehiculo.horaIngresoFila = null;
-    vehiculo.estadoViaje = 'listo';
-    await this.vehiculoRepo.save(vehiculo);
+    const puestoFila = vehiculo.puestoFila || 0;
+    const tienePasajeros =
+      (vehiculo.asientosOcupados || []).length > 0;
 
-    await this.reindexarFila(paradaSalida);
+    const solicitud = this.solicitudRetiroRepo.create({
+      choferId,
+      choferNombre: `${usuario.nombre || ''} ${usuario.apellidos || ''}`.trim() || usuario.nombreUsuario,
+      placa: vehiculo.placa,
+      vehiculoId: vehiculo.id,
+      parada: vehiculo.paradaActual,
+      puestoFila,
+      tienePasajeros,
+      cantidadAsientos: vehiculo.asientosOcupados?.length || 0,
+      motivo: motivo.trim(),
+      estado: 'PENDIENTE',
+    });
+
+    const guardada = await this.solicitudRetiroRepo.save(solicitud);
     this.flotaGateway.notificarCambioFlota();
 
+    const mensaje = puestoFila === 1 && tienePasajeros
+      ? 'Solicitud enviada. Como eres el puesto 1 con pasajeros, la secretaría transferirá tus pasajeros al siguiente chofer antes de aprobarla.'
+      : 'Solicitud enviada a la secretaría para su aprobación.';
+
     return {
-      paradaActual: vehiculo.paradaActual,
-      mensaje: 'Saliste de la fila correctamente. Los puestos se reorganizaron.',
+      solicitud: guardada,
+      aprobacionAutomatica: !(puestoFila === 1 && tienePasajeros),
+      mensaje,
     };
   }
 
-  private async reindexarFila(parada: string) {
-    const fila = await this.vehiculoRepo.find({
-      where: { paradaActual: parada },
-      order: { puestoFila: 'ASC', id: 'ASC' },
+  async obtenerMiSolicitudRetiro(choferId: string) {
+    const solicitud = await this.solicitudRetiroRepo.findOne({
+      where: { choferId },
+      order: { fechaCreacion: 'DESC' },
     });
-
-    for (let i = 0; i < fila.length; i++) {
-      const puestoEsperado = i + 1;
-      if (fila[i].puestoFila !== puestoEsperado) {
-        fila[i].puestoFila = puestoEsperado;
-        await this.vehiculoRepo.save(fila[i]);
-      }
-    }
+    return solicitud || null;
   }
 
 
@@ -536,21 +1130,75 @@ export class ChoferService {
       throw new NotFoundException('Viaje no encontrado');
     }
 
-    viaje.estado = 'finalizado';
-    viaje.horaLlegada = new Date().toTimeString().slice(0, 5);
-    await this.viajeRepo.save(viaje);
+    // Operación atómica: se bloquea el vehículo PRIMERO (pessimistic_write),
+    // al igual que registrarVenta() y ventaManual(), y dentro de la MISMA
+    // transacción se relee el estado real y se actualizan el viaje y el
+    // vehículo. Los asientos de PASAJEROS se liberan, pero los asientos del
+    // chofer (asientosChofer) se conservan tal como están configurados, sin
+    // inventar ningún fallback [1,2]. Si una venta coincide de forma
+    // simultánea, PostgreSQL serializa ambas sobre la misma fila del vehículo.
+    const viajeFinalizado =
+      await this.dataSource.transaction(async (manager) => {
+        const vehiculoRepo = manager.getRepository(Vehiculo);
+        const viajeRepo = manager.getRepository(Viaje);
+        const boletoRepo = manager.getRepository(Boleto);
 
-    const boletos = await this.boletoRepo.find({
-      where: { viajeId: viaje.id },
-    });
+        const vehiculo = await vehiculoRepo.findOne({
+          where: { placa: viaje.placaVehiculo },
+          lock: { mode: 'pessimistic_write' },
+        });
 
-    viaje.pasajerosTransportados = boletos.length;
-    viaje.totalGenerado = boletos.reduce((acc, b) => acc + Number(b.monto), 0);
-    await this.viajeRepo.save(viaje);
+        if (!vehiculo) {
+          throw new NotFoundException('Vehiculo no encontrado');
+        }
 
-    await this.crearNotificacion(choferId, 'viaje', 'Viaje finalizado', `Viaje finalizado. ${boletos.length} pasajeros transportados.`);
+        // Releer el viaje bajo el mismo lock (conserva los datos reales)
+        const viajeActual = await viajeRepo.findOne({
+          where: { id: viaje.id },
+        });
 
-    return viaje;
+        if (!viajeActual) {
+          throw new NotFoundException('Viaje no encontrado');
+        }
+
+        viajeActual.estado = 'finalizado';
+        viajeActual.horaLlegada = new Date().toTimeString().slice(0, 5);
+        await viajeRepo.save(viajeActual);
+
+        const boletos = await boletoRepo.find({
+          where: { viajeId: viajeActual.id },
+        });
+
+        viajeActual.pasajerosTransportados = boletos.length;
+        viajeActual.totalGenerado = boletos.reduce((acc, b) => acc + Number(b.monto), 0);
+        await viajeRepo.save(viajeActual);
+
+        // Liberar los asientos de pasajeros para la siguiente salida. Los
+        // asientos del chofer (asientosChofer) se conservan sin tocar.
+        const paradaOrigen = vehiculo.paradaActual;
+
+        vehiculo.asientosOcupados = this.asientosFinalizados(vehiculo);
+        vehiculo.estadoViaje = 'fin_de_ruta';
+        vehiculo.estadoVehiculo = 'activo';
+        // Al finalizar el viaje el vehículo NO vuelve a la fila: ACTIVO y
+        // FUERA DE FILA (puesto 0). El chofer se anota voluntariamente.
+        vehiculo.paradaActual = 'fuera_de_fila';
+        vehiculo.puestoFila = 0;
+        vehiculo.horaIngresoFila = null;
+        await vehiculoRepo.save(vehiculo);
+
+        if (paradaOrigen === 'cochabamba' || paradaOrigen === 'eterazama') {
+          await this.reindexarFila(paradaOrigen, manager);
+        }
+
+        return viajeActual;
+      });
+
+    // Se notifica SOLO después de que la transacción hizo commit.
+    this.flotaGateway.notificarCambioFlota();
+    await this.crearNotificacion(choferId, 'viaje', 'Viaje finalizado', `Viaje finalizado. ${viajeFinalizado.pasajerosTransportados} pasajeros transportados.`);
+
+    return viajeFinalizado;
   }
 
 
@@ -700,75 +1348,154 @@ export class ChoferService {
       throw new NotFoundException('No tiene vehiculo asignado');
     }
 
-    const viaje = await this.viajeRepo.findOne({
-      where: {
-        placaVehiculo: usuario.placaAsignada,
-      },
-      order: { fechaCreacion: 'DESC' },
-    });
-
-    if (!viaje) {
-      throw new BadRequestException('No hay viaje activo para vender pasajes');
+    // Regla de choferes activos: un chofer INACTIVO no puede vender pasajes.
+    if (usuario.estado !== 'activo') {
+      throw new BadRequestException(
+        'No puedes vender pasajes porque tu estado de servicio está INACTIVO. Activa tu estado desde tu panel para poder vender.',
+      );
     }
 
-    const existente = await this.boletoRepo.findOne({
-      where: {
-        viajeId: viaje.id,
-        asiento: data.asiento,
-      },
-    });
+    const placa = usuario.placaAsignada;
 
-    if (existente) {
-      throw new BadRequestException(`El asiento ${data.asiento} ya esta ocupado`);
-    }
+    // Operación atómica: se bloquea el vehículo PRIMERO (pessimistic_write),
+    // se releen sus asientosOcupados/asientosChofer desde PostgreSQL bajo ese
+    // lock y se validan contra ese estado real. Solo entonces se crea el
+    // boleto y el pasaje y se actualizan el viaje y el vehículo, todo dentro
+    // de la MISMA transacción. Si otra compra (boletería o pasajero) ocupa el
+    // mismo asiento de forma simultánea, TypeORM/PostgreSQL serializan ambas
+    // operaciones sobre la misma fila del vehículo: la segunda releerá el
+    // estado actualizado y lanzará un error, haciendo rollback automático.
+    const resultadoVenta =
+      await this.dataSource.transaction(async (manager) => {
+        const vehiculoRepo = manager.getRepository(Vehiculo);
+        const boletoRepo = manager.getRepository(Boleto);
+        const pasajeRepo = manager.getRepository(Pasaje);
+        const viajeRepo = manager.getRepository(Viaje);
 
-    const boleto = this.boletoRepo.create({
-      pasajeroNombre: data.pasajeroNombre,
-      pasajeroTelefono: data.contactoRecibo,
-      placaVehiculo: usuario.placaAsignada,
-      viajeId: viaje.id,
-      asiento: data.asiento,
-      origen: data.origen,
-      destino: data.destino,
-      monto: data.monto,
-      estadoBoleto: 'abordado',
-      estadoPago: 'pagado',
-      escaneado: true,
-      contactoRecibo: data.contactoRecibo,
-    });
+        const vehiculo = await vehiculoRepo.findOne({
+          where: { placa },
+          lock: { mode: 'pessimistic_write' },
+        });
 
-    await this.boletoRepo.save(boleto);
+        if (!vehiculo) {
+          throw new NotFoundException('No tiene vehiculo asignado');
+        }
 
-    const pasaje = this.pasajeRepo.create({
-      pasajeroNombre: data.pasajeroNombre,
-      placaVehiculo: usuario.placaAsignada,
-      asientos: [data.asiento],
-      montoAsientos: data.monto,
-      montoEncomienda: data.montoEncomienda || 0,
-      montoTotal: data.monto + (data.montoEncomienda || 0),
-      tramo: `${data.origen} -> ${data.destino}`,
-      contactoRecibo: data.contactoRecibo,
-    });
+        // Un vehículo POR SALIR ya no recibe ventas: le queda solo partir.
+        if (vehiculo.estadoViaje === 'por_salir') {
+          throw new BadRequestException(
+            'Este vehículo está POR SALIR y ya no recibe ventas de pasajes.',
+          );
+        }
 
-    await this.pasajeRepo.save(pasaje);
+        // Regla A4: solo el chofer que ocupa el PUESTO 1 de la fila de su
+        // parada puede cargar pasajeros y recibir ventas de pasajes.
+        if (vehiculo.paradaActual !== 'cochabamba' && vehiculo.paradaActual !== 'eterazama') {
+          throw new BadRequestException(
+            'Este vehículo no está anotado en ninguna fila y no puede vender pasajes.',
+          );
+        }
+        if (vehiculo.puestoFila !== 1) {
+          throw new BadRequestException(
+            `Solo el chofer que ocupa el PUESTO 1 puede cargar pasajeros y vender pasajes. Este vehículo (${vehiculo.placa}) ocupa el puesto ${vehiculo.puestoFila}.`,
+          );
+        }
 
-    viaje.asientosOcupados = viaje.asientosOcupados + 1;
-    viaje.totalGenerado = Number(viaje.totalGenerado) + data.monto + (data.montoEncomienda || 0);
-    viaje.pasajerosTransportados = viaje.pasajerosTransportados + 1;
-    await this.viajeRepo.save(viaje);
+        const viaje = await viajeRepo.findOne({
+          where: {
+            placaVehiculo: placa,
+          },
+          order: { fechaCreacion: 'DESC' },
+        });
 
-    if (usuario.placaAsignada) {
-      const vehiculo = await this.vehiculoRepo.findOne({
-        where: { placa: usuario.placaAsignada },
-      });
-      if (vehiculo) {
+        if (!viaje) {
+          throw new BadRequestException('No hay viaje activo para vender pasajes');
+        }
+
+        const existente = await boletoRepo.findOne({
+          where: {
+            viajeId: viaje.id,
+            asiento: data.asiento,
+          },
+        });
+
+        if (existente) {
+          throw new BadRequestException(`El asiento ${data.asiento} ya esta ocupado`);
+        }
+
+        const asientosChoferSet = new Set(vehiculo.asientosChofer || []);
+        if (asientosChoferSet.has(data.asiento)) {
+          throw new BadRequestException(
+            `El asiento ${data.asiento} pertenece al chofer y no está disponible para la venta.`,
+          );
+        }
+
+        const asientosOcupadosSet = new Set(vehiculo.asientosOcupados || []);
+        if (asientosOcupadosSet.has(data.asiento)) {
+          throw new BadRequestException(
+            `El asiento ${data.asiento} ya está ocupado y no está disponible para la venta.`,
+          );
+        }
+
+        const boleto = boletoRepo.create({
+          pasajeroNombre: data.pasajeroNombre,
+          pasajeroTelefono: data.contactoRecibo,
+          placaVehiculo: placa,
+          viajeId: viaje.id,
+          asiento: data.asiento,
+          origen: data.origen,
+          destino: data.destino,
+          monto: data.monto,
+          estadoBoleto: 'abordado',
+          estadoPago: 'pagado',
+          escaneado: true,
+          contactoRecibo: data.contactoRecibo,
+        });
+
+        const boletoGuardado =
+          await boletoRepo.save(boleto);
+
+        const pasaje = pasajeRepo.create({
+          pasajeroNombre: data.pasajeroNombre,
+          placaVehiculo: placa,
+          asientos: [data.asiento],
+          montoAsientos: data.monto,
+          montoEncomienda: data.montoEncomienda || 0,
+          montoTotal: data.monto + (data.montoEncomienda || 0),
+          tramo: `${data.origen} -> ${data.destino}`,
+          contactoRecibo: data.contactoRecibo,
+        });
+
+        await pasajeRepo.save(pasaje);
+
+        viaje.asientosOcupados = viaje.asientosOcupados + 1;
+        viaje.totalGenerado = Number(viaje.totalGenerado) + data.monto + (data.montoEncomienda || 0);
+        viaje.pasajerosTransportados = viaje.pasajerosTransportados + 1;
+        await viajeRepo.save(viaje);
+
         const nuevos = Array.from(new Set([...vehiculo.asientosOcupados, data.asiento]));
         vehiculo.asientosOcupados = nuevos;
-        await this.vehiculoRepo.save(vehiculo);
-      }
+        await vehiculoRepo.save(vehiculo);
+
+        // AUTO programación de salida (si esta venta llena el vehículo): en la
+        // MISMA transacción de la venta.
+        const salida = await this.salidasService.programarSalidaEnTransaccion(
+          manager,
+          vehiculo.id,
+          { manual: false },
+        );
+
+        return { boletoGuardado, salida };
+      });
+
+    // Se notifica SOLO después de que la transacción hizo commit.
+    this.flotaGateway.notificarCambioFlota();
+
+    if (resultadoVenta.salida.aplicada) {
+      this.salidasService.emitirNotificaciones(resultadoVenta.salida);
     }
 
-    return boleto;
+    return resultadoVenta.boletoGuardado;
   }
 
 
@@ -1042,6 +1769,10 @@ export class ChoferService {
     vehiculo.estadoVehiculo = nuevoEstado;
 
     if (nuevoEstado === 'inactivo') {
+      // Al inactivar: limpiar asientosOcupados (no hay viaje activo posible).
+      // Los pasajes/viajes anteriores quedan en el historial de PostgreSQL.
+      vehiculo.asientosOcupados = this.asientosFinalizados(vehiculo);
+      vehiculo.estadoViaje = 'listo';
       await this.sacarDeFila(vehiculo);
     }
 
@@ -1083,53 +1814,172 @@ export class ChoferService {
       throw new NotFoundException('No tiene vehiculo asignado');
     }
 
+    const placa = usuario.placaAsignada;
+
     const estadosValidos = ['en_ruta', 'fin_de_ruta', 'mantenimiento'];
     if (!estadosValidos.includes(nuevoEstado)) {
       throw new BadRequestException('Estado del viaje no valido');
     }
 
-    const vehiculo = await this.vehiculoRepo.findOne({
-      where: { placa: usuario.placaAsignada },
+    let vehiculo = await this.vehiculoRepo.findOne({
+      where: { placa },
     });
 
     if (!vehiculo) {
       throw new NotFoundException('Vehiculo no encontrado');
     }
 
-    const viaje = await this.viajeRepo.findOne({
-      where: { placaVehiculo: usuario.placaAsignada },
-      order: { fechaCreacion: 'DESC' },
-    });
-
-    vehiculo.estadoViaje = nuevoEstado;
-
     if (nuevoEstado === 'en_ruta') {
-      vehiculo.estadoVehiculo = 'activo';
-      if (viaje) {
-        viaje.estado = 'en_ruta';
-        viaje.horaSalida = viaje.horaSalida || new Date().toTimeString().slice(0, 5);
-        await this.viajeRepo.save(viaje);
-      }
-      // Al iniciar la ruta el vehiculo sale de la fila de la parada
-      await this.sacarDeFila(vehiculo);
-    } else if (nuevoEstado === 'fin_de_ruta') {
-      vehiculo.estadoVehiculo = 'activo';
-      if (viaje) {
-        viaje.estado = 'finalizado';
-        viaje.horaLlegada = viaje.horaLlegada || new Date().toTimeString().slice(0, 5);
-        const boletos = await this.boletoRepo.find({
-          where: { viajeId: viaje.id },
+      // INICIO DE RUTA: transaccional y con lock. Se serializa con la fila de
+      // la parada (para que la reindexación no colisione) y con "por salir",
+      // y se re-chequea bajo el lock para que un doble clic NUNCA repita la
+      // salida ni duplique notificaciones.
+      const resultadoRutaEnRuta = await this.dataSource.transaction(async (manager) => {
+        const vehiculoRepo = manager.getRepository(Vehiculo);
+
+        const vRef = await vehiculoRepo.findOne({ where: { placa } });
+        if (!vRef) {
+          throw new NotFoundException('Vehiculo no encontrado');
+        }
+
+        const lockKey =
+          vRef.paradaActual === 'cochabamba'
+            ? 771001
+            : vRef.paradaActual === 'eterazama'
+            ? 771002
+            : 771100;
+        await manager.query('SELECT pg_advisory_xact_lock($1)', [lockKey]);
+
+        const vLock = await vehiculoRepo.findOne({
+          where: { placa },
+          lock: { mode: 'pessimistic_write' },
         });
-        viaje.pasajerosTransportados = boletos.length;
-        viaje.totalGenerado = boletos.reduce((acc, b) => acc + Number(b.monto), 0);
-        viaje.asientosOcupados = boletos.length;
-        await this.viajeRepo.save(viaje);
+
+        if (!vLock) {
+          throw new NotFoundException('Vehiculo no encontrado');
+        }
+
+        // Re-chequeo bajo el lock: ya está EN RUTA (doble clic o llegada del
+        // temporizador) => no se vuelve a ejecutar nada.
+        if (vLock.estadoViaje === 'en_ruta' || vLock.paradaActual === 'en_ruta') {
+          return null;
+        }
+
+        if (vLock.estadoViaje === 'mantenimiento') {
+          throw new BadRequestException(
+            'El vehículo está en mantenimiento y no puede iniciar la ruta.',
+          );
+        }
+
+        const res = await this.salidasService.transicionarEnRutaEnTransaccion(
+          manager,
+          vLock,
+        );
+        return res;
+      });
+
+      const resultadoEnRuta = resultadoRutaEnRuta;
+
+      if (resultadoEnRuta) {
+        this.salidasService.emitirNotificaciones(resultadoEnRuta);
       }
-      // Al finalizar la ruta se liberan todos los asientos de pasajeros para
-      // el siguiente viaje. Los 2 asientos del chofer quedan reservados.
+
+      // Releer el vehículo con el estado real dejado por la transacción.
+      const actualizado = await this.vehiculoRepo.findOne({ where: { placa } });
+      if (!actualizado) {
+        throw new NotFoundException('Vehiculo no encontrado');
+      }
+      vehiculo = actualizado;
+    } else if (nuevoEstado === 'fin_de_ruta') {
+      if (vehiculo.estadoViaje === 'por_salir') {
+        throw new BadRequestException(
+          'El vehículo está POR SALIR. Debe iniciar la ruta antes de finalizarla.',
+        );
+      }
+      vehiculo.estadoViaje = 'fin_de_ruta';
+      vehiculo.estadoVehiculo = 'activo';
+      // Al finalizar la ruta se liberan SOLO los asientos de pasajeros para
+      // el siguiente viaje; los asientos del chofer (asientosChofer) se
+      // conservan tal como están configurados, sin fallback [1,2]. Se ejecuta
+      // en una transacción con lock pesimista del vehículo para serializar
+      // con registrarVenta()/ventaManual() y evitar estados inconsistentes.
+      const vehiculoFinalizado =
+        await this.dataSource.transaction(async (manager) => {
+          const vehiculoRepo = manager.getRepository(Vehiculo);
+          const viajeRepo = manager.getRepository(Viaje);
+          const boletoRepo = manager.getRepository(Boleto);
+
+          const vehiculoLock = await vehiculoRepo.findOne({
+            where: { placa },
+            lock: { mode: 'pessimistic_write' },
+          });
+
+          if (!vehiculoLock) {
+            throw new NotFoundException('Vehiculo no encontrado');
+          }
+
+          const viajeLock = await viajeRepo.findOne({
+            where: { placaVehiculo: placa },
+            order: { fechaCreacion: 'DESC' },
+          });
+
+          if (viajeLock) {
+            viajeLock.estado = 'finalizado';
+            viajeLock.horaLlegada = viajeLock.horaLlegada || new Date().toTimeString().slice(0, 5);
+            const boletos = await boletoRepo.find({
+              where: { viajeId: viajeLock.id },
+            });
+            viajeLock.pasajerosTransportados = boletos.length;
+            viajeLock.totalGenerado = boletos.reduce((acc, b) => acc + Number(b.monto), 0);
+            viajeLock.asientosOcupados = boletos.length;
+            await viajeRepo.save(viajeLock);
+          }
+
+          const paradaOrigen = vehiculoLock.paradaActual;
+
+          vehiculoLock.asientosOcupados = this.asientosFinalizados(vehiculoLock);
+          vehiculoLock.estadoViaje = 'fin_de_ruta';
+          vehiculoLock.estadoVehiculo = 'activo';
+          // Al finalizar la ruta el vehículo NO vuelve a la fila: queda ACTIVO
+          // y FUERA DE FILA (puesto 0). Solo el chofer decide voluntariamente
+          // anotarse de nuevo con "Anotarme en Cochabamba/Eterazama".
+          vehiculoLock.paradaActual = 'fuera_de_fila';
+          vehiculoLock.puestoFila = 0;
+          vehiculoLock.horaIngresoFila = null;
+          await vehiculoRepo.save(vehiculoLock);
+
+          // Si por alguna razón estaba dentro de una fila, se reindexa esa fila
+          // para que los demás choferes avancen y quede 1..N sin huecos.
+          if (paradaOrigen === 'cochabamba' || paradaOrigen === 'eterazama') {
+            await this.reindexarFila(paradaOrigen, manager);
+          }
+
+          return vehiculoLock;
+        });
+
+      // Tomar el estado real guardado por la transacción para el save final.
+      vehiculo = vehiculoFinalizado;
       // No se elimina el historial de viajes, pasajes ni pagos anteriores.
-      vehiculo.asientosOcupados = [];
     } else if (nuevoEstado === 'mantenimiento') {
+      if (vehiculo.estadoViaje === 'por_salir') {
+        throw new BadRequestException(
+          'El vehículo está POR SALIR y no puede pasar a mantenimiento.',
+        );
+      }
+      // Regla de negocio: NO permitir pasar a mantenimiento si el vehículo
+      // tiene pasajeros activos (viaje en curso con asientos vendidos).
+      const asientosChofer = new Set(vehiculo.asientosChofer || []);
+      const pasajerosActivos = (vehiculo.asientosOcupados || []).filter(
+        (a) => !asientosChofer.has(a),
+      ).length;
+      if (pasajerosActivos > 0 && vehiculo.estadoViaje === 'en_ruta') {
+        throw new BadRequestException(
+          'No se puede pasar a mantenimiento: el vehículo tiene pasajeros activos en ruta. Finalice el viaje primero.',
+        );
+      }
+      vehiculo.estadoViaje = 'mantenimiento';
+      // Limpiar asientos al entrar en mantenimiento
+      vehiculo.asientosOcupados = this.asientosFinalizados(vehiculo);
       await this.sacarDeFila(vehiculo);
     }
 
@@ -1144,12 +1994,16 @@ export class ChoferService {
       mantenimiento: 'Mantenimiento',
     };
 
-    await this.crearNotificacion(
-      choferId,
-      'estado_viaje',
-      'Estado del viaje actualizado',
-      `Estado del viaje cambiado a: ${etiquetas[nuevoEstado]}`,
-    );
+    // En EN RUTA la notificación al chofer ya la crea el flujo de salida
+    // ("Salida en ruta"). Para los demás estados se mantiene la notificación.
+    if (nuevoEstado !== 'en_ruta') {
+      await this.crearNotificacion(
+        choferId,
+        'estado_viaje',
+        'Estado del viaje actualizado',
+        `Estado del viaje cambiado a: ${etiquetas[nuevoEstado]}`,
+      );
+    }
 
     return {
       estadoVehiculo: vehiculo.estadoVehiculo,
@@ -1169,6 +2023,12 @@ export class ChoferService {
       await this.reindexarFila(paradaAnterior);
     }
     return vehiculo;
+  }
+
+  // 8.3 PROGRAMAR SALIDA (POR SALIR): delega en el módulo de salidas. Solo el
+  // chofer del puesto 1 puede; es idempotente (sin doble activación).
+  async programarSalidaChofer(choferId: string) {
+    return this.salidasService.programarSalida(choferId);
   }
 
 
@@ -1443,6 +2303,7 @@ export class ChoferService {
       gmail: usuario.gmail,
       telefono: usuario.telefono,
       rol: usuario.rol,
+      estado: usuario.estado,
       placaAsignada: usuario.placaAsignada,
       fechaRegistro: usuario.fechaRegistro,
     };
@@ -1486,6 +2347,7 @@ export class ChoferService {
       gmail: usuario.gmail,
       telefono: usuario.telefono,
       rol: usuario.rol,
+      estado: usuario.estado,
       placaAsignada: usuario.placaAsignada,
     };
   }

@@ -56,6 +56,32 @@ export class ChoferController {
     return this.choferService.salirDeFila(req.user.userId);
   }
 
+  // El chofer indica manualmente su ubicación/sector actual (COCHABAMBA o
+  // ETERAZAMA). La ubicación es independiente de la fila. Si está anotado en
+  // otra fila, el backend lo saca de esa fila antes de cambiar de sector.
+  @Patch('ubicacion')
+  cambiarUbicacion(@Request() req: any, @Body('ubicacion') ubicacion: string) {
+    return this.choferService.cambiarUbicacion(req.user.userId, ubicacion);
+  }
+
+  @Post('fila/retiro-solicitar')
+  solicitarRetiroFila(@Request() req: any, @Body('motivo') motivo: string) {
+    return this.choferService.solicitarRetiroFila(req.user.userId, motivo);
+  }
+
+  // PROGRAMAR SALIDA (POR SALIR): solo el chofer del PUESTO 1 de su parada.
+  // Deja el vehículo con salidaProgramada = ahora + 10 min (cuenta regresiva
+  // real persistida en PostgreSQL). Es idempotente (no doble activación).
+  @Post('salida/programar')
+  programarSalida(@Request() req: any) {
+    return this.choferService.programarSalidaChofer(req.user.userId);
+  }
+
+  @Get('fila/retiro')
+  obtenerMiSolicitudRetiro(@Request() req: any) {
+    return this.choferService.obtenerMiSolicitudRetiro(req.user.userId);
+  }
+
 
   // 4. Mi Viaje
   @Get('viaje')
@@ -143,6 +169,14 @@ export class ChoferController {
   @Patch('estado-viaje')
   cambiarEstadoViaje(@Request() req: any, @Body('estado') estado: string) {
     return this.choferService.cambiarEstadoViaje(req.user.userId, estado);
+  }
+
+  // Cambiar el estado de servicio del chofer (ACTIVO/INACTIVO).
+  // Solo el chofer autenticado puede cambiar SU PROPIO estado
+  // (req.user.userId proviene del JWT, nunca del frontend).
+  @Patch('estado')
+  cambiarEstadoServicio(@Request() req: any, @Body('estado') estado: string) {
+    return this.choferService.cambiarEstadoServicio(req.user.userId, estado);
   }
 
 

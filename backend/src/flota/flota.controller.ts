@@ -12,6 +12,8 @@ import {
 import { FlotaService } from './flota.service';
 
 import { CrearVehiculoDto } from './dto/crear-vehiculo.dto';
+import { CrearTipoVehiculoDto } from './dto/crear-tipo-vehiculo.dto';
+import { ConfigurarAsientosDto } from './dto/configurar-asientos.dto';
 
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
@@ -136,6 +138,67 @@ eliminarVehiculo(
 ){
 
 return this.flotaService.eliminarVehiculo(id);
+
+}
+
+
+
+// =============================================
+// TIPOS / MODELOS DE VEHÍCULO
+// =============================================
+
+@Get('tipos')
+obtenerTiposVehiculo(){
+
+return this.flotaService.obtenerTiposVehiculo();
+
+}
+
+
+
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(ROLES.SECRETARIA)
+@Post('tipos')
+crearTipoVehiculo(
+@Body() body: CrearTipoVehiculoDto
+){
+
+return this.flotaService.crearTipoVehiculo(body.nombre);
+
+}
+
+
+
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(ROLES.SECRETARIA)
+@Delete('tipos/:id')
+eliminarTipoVehiculo(
+@Param('id') id:number
+){
+
+return this.flotaService.eliminarTipoVehiculo(id);
+
+}
+
+
+
+// =============================================
+// CONFIGURACIÓN DINÁMICA DE ASIENTOS
+// =============================================
+
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(ROLES.SECRETARIA)
+@Patch(':id/asientos')
+configurarAsientos(
+@Param('id') id:number,
+@Body() body: ConfigurarAsientosDto
+){
+
+return this.flotaService.configurarAsientos(
+id,
+body.filas,
+body.asientosChofer
+);
 
 }
 

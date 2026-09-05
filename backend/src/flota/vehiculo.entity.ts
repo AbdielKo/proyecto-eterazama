@@ -76,6 +76,26 @@ export class Vehiculo {
 
 
   @Column({
+    type:'int',
+    array:true,
+    default:'{}'
+  })
+  asientosChofer:number[];
+
+  // Configuración dinámica de la distribución/orden de los asientos.
+  // Cada trufi conserva su propia configuración definida por Secretaría.
+  // Estructura: { ancho: number; filas: (number | null)[][] }
+  // Donde cada fila es un array de celdas: un número = asiento (numeración
+  // libre/única), y null = espacio vacío (no vendible). El índice de fila es
+  // la posición vertical (Y) y el índice dentro de la fila la posición
+  // horizontal (X). El tipo de asiento chofer se define en asientosChofer.
+  @Column({
+    type:'jsonb',
+    nullable:true
+  })
+  configuracionAsientos: { ancho: number; filas: (number | null)[][] } | null;
+
+  @Column({
     default:14
   })
   capacidadTotal:number;
@@ -105,6 +125,17 @@ export class Vehiculo {
     nullable:true
   })
   fechaEstado:Date | null;
+
+
+  // Fecha/hora real (timestamp) en la que el vehículo está programado para
+  // partir (estadoViaje = 'por_salir'). Se persiste en PostgreSQL; la cuenta
+  // regresiva es solo la diferencia con la hora actual. Al llegar el momento,
+  // el backend transita el vehículo a EN RUTA y limpia este campo.
+  @Column({
+    type:'timestamp',
+    nullable:true
+  })
+  salidaProgramada:Date | null;
 
 
   // ====================================

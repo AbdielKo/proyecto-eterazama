@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   obtenerBoleteriaParadas,
   obtenerVehiculoBoleteria,
@@ -12,6 +12,7 @@ import type {
 } from "../../types/pasaje";
 import { useFlotaSocket } from "../../hooks/useFlotaSocket";
 import ComprobantePreview from "./ComprobantePreview";
+import DistribucionAsientos from "../../components/DistribucionAsientos";
 import {
   AlertCircle,
   AlertTriangle,
@@ -33,12 +34,42 @@ import {
   Undo2,
   CheckCircle2,
   Ban,
+  Timer,
 } from "lucide-react";
 
 const NOMBRES: Record<string, string> = {
   cochabamba: "Cochabamba",
   eterazama: "Eterazama",
 };
+
+// Cuenta regresiva real del estado POR SALIR (salidaProgramada viene de
+// PostgreSQL; esto solo la visualiza en tiempo real).
+function getRestante(salida: string | null | undefined): { mins: number; segs: number; termino: boolean } {
+  if (!salida) return { mins: 0, segs: 0, termino: false };
+  const restante = Math.max(0, new Date(salida).getTime() - Date.now());
+  return {
+    mins: Math.floor(restante / 60000),
+    segs: Math.floor((restante % 60000) / 1000),
+    termino: restante <= 0,
+  };
+}
+
+function TemporizadorSalida({ salida }: { salida: string | null | undefined }) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  void tick;
+  const { mins, segs, termino } = getRestante(salida);
+  if (!salida) return null;
+  return (
+    <span className="flex items-center gap-1">
+      <Timer className="w-3 h-3" />
+      {termino ? "partiendo..." : `sale en ${String(mins).padStart(2, "0")}:${String(segs).padStart(2, "0")}`}
+    </span>
+  );
+}
 
 type Paso = "paradas" | "asientos" | "pasajeros" | "resumen" | "confirmacion";
 
@@ -57,6 +88,7 @@ interface EstadoBadgeProps {
 function EstadoBadge({ estado }: EstadoBadgeProps) {
   const colores: Record<string, string> = {
     activo: "bg-emerald-400/10 text-emerald-400",
+    por_salir: "bg-blue-400/10 text-blue-400",
     en_ruta: "bg-sky-400/10 text-sky-400",
     fin_de_ruta: "bg-purple-400/10 text-purple-400",
     mantenimiento: "bg-amber-400/10 text-amber-400",
@@ -65,6 +97,7 @@ function EstadoBadge({ estado }: EstadoBadgeProps) {
   };
   const etiquetas: Record<string, string> = {
     activo: "ACTIVO",
+    por_salir: "POR SALIR",
     en_ruta: "EN RUTA",
     fin_de_ruta: "FIN DE RUTA",
     mantenimiento: "MANTENIMIENTO",
@@ -80,14 +113,6 @@ function EstadoBadge({ estado }: EstadoBadgeProps) {
       {etiquetas[estado] || estado}
     </span>
   );
-}
-
-function generarFilas(capacidadTotal: number): number[][] {
-  const filas: number[][] = [];
-  for (let i = 1; i <= capacidadTotal; i += 3) {
-    filas.push([i, i + 1, i + 2].filter((n) => n <= capacidadTotal));
-  }
-  return filas;
 }
 
 function extraerError(e: unknown): string {
@@ -174,14 +199,17 @@ export default function Boleteria() {
   const total = subtotal + encomienda;
 
   const ocupados = vehiculo?.asientosOcupados || [];
-  const filas = useMemo(
-    () => generarFilas(vehiculo?.capacidadTotal || 12),
-    [vehiculo?.capacidadTotal]
-  );
-  const capacidadPasajeros = (vehiculo?.capacidadTotal || 12) - 2;
-  const asientosChofer = vehiculo?.asientosChofer?.length
-    ? vehiculo.asientosChofer
-    : [1, 2];
+  const asientosChofer = vehiculo?.asientosChofer || [];
+  const configAsientos = (() => {
+    const cap = vehiculo?.capacidadTotal || 12;
+    const cfg = vehiculo?.configuracionAsientos;
+    if (cfg && Array.isArray(cfg.filas) && cfg.filas.length > 0) return cfg;
+    const filas: (number | null)[][] = [];
+    for (let i = 1; i <= cap; i += 3) {
+      filas.push([i, i + 1, i + 2].filter((n) => n <= cap));
+    }
+    return { ancho: 3, filas };
+  })();
 
   const origen = NOMBRES[tramo];
   const destino = tramo === "cochabamba" ? "Eterazama" : "Cochabamba";
@@ -199,7 +227,6 @@ export default function Boleteria() {
   function toggleAsiento(num: number) {
     if (asientosChofer.includes(num)) return;
     if (ocupados.includes(num)) return;
-    if (num < 3 || num > capacidadPasajeros + 2) return;
     setAsientosSel((prev) => {
       const esta = prev.includes(num);
       const nuevos = esta ? prev.filter((a) => a !== num) : [...prev, num];
@@ -210,38 +237,6 @@ export default function Boleteria() {
       });
       return nuevos;
     });
-  }
-
-  function renderAsiento(num: number) {
-    const ocupado = ocupados.includes(num);
-    const seleccionado = asientosSel.includes(num);
-    if (ocupado) {
-      return (
-        <button
-          key={num}
-          type="button"
-          onClick={() => verOcupado(num)}
-          title="Ver pasajero y pasaje"
-          className={`w-14 h-14 rounded-lg text-xs font-medium transition-all cursor-pointer border bg-red-600/20 text-red-400 border-red-600/20 hover:bg-red-600/30`}
-        >
-          {num}
-        </button>
-      );
-    }
-    return (
-      <button
-        key={num}
-        type="button"
-        onClick={() => toggleAsiento(num)}
-        className={`w-14 h-14 rounded-lg text-xs font-medium transition-all cursor-pointer border ${
-          seleccionado
-            ? "bg-sky-600 text-white ring-2 ring-sky-400 shadow-lg shadow-sky-600/30 border-sky-500 scale-105"
-            : "bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white border-gray-700"
-        }`}
-      >
-        {num}
-      </button>
-    );
   }
 
   function codigoDe(p: Pasaje): string {
@@ -420,7 +415,45 @@ export default function Boleteria() {
           <p className="text-gray-400 text-sm">Cargando boletería...</p>
         </div>
       ) : paso === "paradas" ? (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div className="space-y-5">
+          {(paradas?.porSalir?.length ?? 0) > 0 && (
+            <div className="bg-gray-900 border border-blue-500/30 rounded-2xl p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <div className="w-9 h-9 rounded-lg bg-blue-400/10 text-blue-400 flex items-center justify-center">
+                  <Timer className="w-4 h-4" />
+                </div>
+                <div>
+                  <h2 className="font-bold text-white">Por salir</h2>
+                  <p className="text-[11px] text-gray-500">Vehículos con salida programada: ya no reciben ventas</p>
+                </div>
+                <span className="ml-auto bg-blue-500/10 text-blue-300 text-[10px] px-2 py-0.5 rounded-full">
+                  {paradas?.porSalir.length} trufi{paradas?.porSalir.length !== 1 ? "s" : ""}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {paradas?.porSalir.map((v) => (
+                  <div key={v.id} className="rounded-xl bg-blue-500/5 border border-blue-500/20 p-3">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sky-400 font-mono font-bold text-sm">{v.placa}</span>
+                      <EstadoBadge estado={v.estadoViaje || ""} />
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-400/10 text-blue-300 font-medium">
+                        {(NOMBRES[v.paradaActual] || v.paradaActual || "").toUpperCase()}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-300 mt-1 truncate">
+                      <User className="w-3 h-3 inline mr-1 -mt-0.5" />
+                      {v.choferNombre}
+                    </p>
+                    <p className="text-[11px] text-gray-500 mt-0.5 capitalize">{v.tipoVehiculo} · {v.color}</p>
+                    <p className="text-xs text-blue-300 mt-2">
+                      <TemporizadorSalida salida={v.salidaProgramada} />
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
           {(["cochabamba", "eterazama"] as const).map((parada) => {
             const lista = parada === "cochabamba" ? paradas?.cochabamba || [] : paradas?.eterazama || [];
             const esCochabamba = parada === "cochabamba";
@@ -461,17 +494,29 @@ export default function Boleteria() {
                   <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
                     {lista.map((v) => {
                       const disponibles = v.asientosLibres || 0;
+                      const esPrimero = v.puestoFila === 1;
                       return (
                         <button
                           key={v.id}
-                          onClick={() => seleccionarVehiculo(v, parada)}
-                          className="w-full bg-gray-800/70 hover:bg-gray-800 border border-gray-700/60 hover:border-sky-500/50 rounded-xl p-3 text-left transition-all cursor-pointer"
+                          onClick={() => esPrimero && seleccionarVehiculo(v, parada)}
+                          disabled={!esPrimero}
+                          className={`w-full rounded-xl p-3 text-left transition-all ${
+                            esPrimero
+                              ? "bg-gray-800/70 hover:bg-gray-800 border border-gray-700/60 hover:border-sky-500/50 cursor-pointer"
+                              : "bg-gray-900/40 border border-gray-800 opacity-60 cursor-not-allowed"
+                          }`}
                         >
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0">
                               <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-[10px] bg-gray-700 text-gray-300 px-1.5 py-0.5 rounded">#{v.puestoFila}</span>
                                 <span className="text-sky-400 font-mono font-bold text-sm">{v.placa}</span>
                                 <EstadoBadge estado={v.estadoVehiculo || v.estadoViaje || ""} />
+                                {esPrimero ? (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-400/10 text-emerald-400 font-medium">PUESTO 1 · VENDE</span>
+                                ) : (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-gray-700/40 text-gray-400">En espera</span>
+                                )}
                               </div>
                               <p className="text-xs text-gray-300 mt-1 truncate">
                                 <User className="w-3 h-3 inline mr-1 -mt-0.5" />
@@ -511,6 +556,7 @@ export default function Boleteria() {
               </div>
             );
           })}
+          </div>
         </div>
       ) : null}
 
@@ -555,31 +601,14 @@ export default function Boleteria() {
               <h2 className="font-semibold text-white mb-3 flex items-center gap-2">
                 <Armchair className="w-5 h-5 text-sky-400" /> Seleccionar asientos
               </h2>
-              <div className="flex flex-col items-center gap-1.5 max-w-sm mx-auto">
-                <div className="bg-gray-700 rounded-t-xl w-full py-2 text-center text-[10px] text-gray-300 font-bold tracking-widest">
-                  FRENTE
-                </div>
-                <div className="flex flex-col items-center gap-1.5 w-full">
-                  {filas.map((fila, fi) => (
-                    <div key={fi} className="flex justify-center gap-1.5">
-                      {fila.map((num) =>
-                        asientosChofer.includes(num) ? (
-                          <div
-                            key={num}
-                            title="Asiento del chofer"
-                            className="w-14 h-14 rounded-lg bg-amber-600/25 text-amber-400 border border-amber-600/40 flex flex-col items-center justify-center text-[8px] font-semibold"
-                          >
-                            <User className="w-4 h-4 mb-0.5" />
-                            CHOFER
-                          </div>
-                        ) : (
-                          renderAsiento(num)
-                        )
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <DistribucionAsientos
+                config={configAsientos}
+                asientosChofer={asientosChofer}
+                asientosOcupados={ocupados}
+                seleccionados={asientosSel}
+                onSeleccionar={(num) => toggleAsiento(num)}
+                onClickOcupado={(num) => verOcupado(num)}
+              />
 
               <div className="flex flex-wrap gap-3 text-[11px] text-gray-500 mt-4 justify-center">
                 <span className="flex items-center gap-1">
@@ -593,6 +622,9 @@ export default function Boleteria() {
                 </span>
                 <span className="flex items-center gap-1">
                   <span className="w-3.5 h-3.5 bg-red-600/30 rounded border border-red-600/20" /> Ocupado
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-3.5 h-3.5 bg-gray-900 rounded border border-dashed border-gray-700" /> Espacio
                 </span>
               </div>
             </div>

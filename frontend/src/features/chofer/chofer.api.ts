@@ -9,6 +9,9 @@ import type {
   EstadisticasChofer,
   PerfilChofer,
   EstadoVehiculoActualizado,
+  SolicitudRetiro,
+  RespuestaSolicitarRetiro,
+  CambiarUbicacionRespuesta,
 } from "./chofer.types";
 
 
@@ -39,6 +42,32 @@ export async function salirDeFila(): Promise<{ paradaActual: string; mensaje: st
   return res.data;
 }
 
+export async function cambiarUbicacion(
+  ubicacion: "cochabamba" | "eterazama"
+): Promise<CambiarUbicacionRespuesta> {
+  const res = await api.patch("/chofer/ubicacion", { ubicacion });
+  return res.data;
+}
+
+export async function programarSalida(): Promise<{
+  estadoViaje: string;
+  salidaProgramada: string | null;
+  mensaje: string;
+}> {
+  const res = await api.post("/chofer/salida/programar");
+  return res.data;
+}
+
+export async function solicitarRetiroFila(motivo: string): Promise<RespuestaSolicitarRetiro> {
+  const res = await api.post("/chofer/fila/retiro-solicitar", { motivo });
+  return res.data;
+}
+
+export async function obtenerMiSolicitudRetiro(): Promise<SolicitudRetiro | null> {
+  const res = await api.get("/chofer/fila/retiro");
+  return res.data;
+}
+
 
 export async function validarBoletoQR(codigoQR: string): Promise<ValidacionQR> {
   const res = await api.post("/chofer/validar-qr", { codigoQR });
@@ -58,6 +87,13 @@ export async function cambiarEstadoVehiculo(estado: string): Promise<EstadoVehic
 
 export async function cambiarEstadoViaje(estado: string): Promise<EstadoVehiculoActualizado> {
   const res = await api.patch("/chofer/estado-viaje", { estado });
+  return res.data;
+}
+
+export async function cambiarEstadoServicio(
+  estado: "activo" | "inactivo"
+): Promise<{ id: string; estado: string; mensaje: string }> {
+  const res = await api.patch("/chofer/estado", { estado });
   return res.data;
 }
 

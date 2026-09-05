@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "../../hooks/useAuth";
 import { useNavigate } from "react-router-dom";
-import { obtenerPerfil, actualizarPerfil } from "./chofer.api";
+import { obtenerPerfil, actualizarPerfil, cambiarEstadoServicio } from "./chofer.api";
 import type { PerfilChofer } from "./chofer.types";
-import { User, Mail, Phone, Shield, Calendar, Save } from "lucide-react";
+import { User, Mail, Phone, Shield, Calendar, Save, Power, PowerOff } from "lucide-react";
 
 export default function PerfilChofer() {
   const { logout } = useAuth();
@@ -12,6 +12,7 @@ export default function PerfilChofer() {
   const [editando, setEditando] = useState(false);
   const [form, setForm] = useState({ nombre: "", apellidos: "", telefono: "" });
   const [guardando, setGuardando] = useState(false);
+  const [cambiandoEstado, setCambiandoEstado] = useState(false);
 
   useEffect(() => {
     obtenerPerfil()
@@ -21,6 +22,20 @@ export default function PerfilChofer() {
       })
       .catch(console.error);
   }, []);
+
+  async function handleToggleEstado() {
+    if (!perfil) return;
+    setCambiandoEstado(true);
+    try {
+      const siguiente = perfil.estado === "activo" ? "inactivo" : "activo";
+      const resultado = await cambiarEstadoServicio(siguiente);
+      setPerfil({ ...perfil, estado: resultado.estado });
+    } catch (e: any) {
+      alert(e?.response?.data?.message || "No se pudo cambiar el estado de servicio.");
+    } finally {
+      setCambiandoEstado(false);
+    }
+  }
 
   async function handleGuardar() {
     setGuardando(true);
@@ -151,6 +166,37 @@ export default function PerfilChofer() {
                 {perfil.fechaRegistro ? new Date(perfil.fechaRegistro).toLocaleDateString() : "-"}
               </p>
             </div>
+          </div>
+
+          <div
+            className={`flex items-center gap-4 rounded-xl p-4 ${
+              perfil.estado === "activo"
+                ? "bg-emerald-500/10 border border-emerald-500/30"
+                : "bg-red-500/10 border border-red-500/30"
+            }`}
+          >
+            {perfil.estado === "activo" ? (
+              <Power className="w-5 h-5 text-emerald-400 shrink-0" />
+            ) : (
+              <PowerOff className="w-5 h-5 text-red-400 shrink-0" />
+            )}
+            <div className="flex-1">
+              <p className="text-xs text-gray-500">Estado de servicio</p>
+              <p className={`text-sm font-bold mt-1 ${perfil.estado === "activo" ? "text-emerald-400" : "text-red-400"}`}>
+                {perfil.estado === "activo" ? "ACTIVO" : "INACTIVO"}
+              </p>
+            </div>
+            <button
+              onClick={handleToggleEstado}
+              disabled={cambiandoEstado}
+              className={`text-xs font-semibold px-3 py-2 rounded-lg transition-colors cursor-pointer disabled:opacity-50 ${
+                perfil.estado === "activo"
+                  ? "bg-red-600/20 text-red-400 hover:bg-red-600/30"
+                  : "bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30"
+              }`}
+            >
+              {perfil.estado === "activo" ? "Desactivarme" : "Activarme"}
+            </button>
           </div>
         </div>
 

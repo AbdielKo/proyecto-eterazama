@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, DataSource, EntityManager } from 'typeorm';
 
 import { JwtService } from '@nestjs/jwt';
 
@@ -17,6 +17,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { Usuario } from './usuario.entity';
 
 import { FlotaService } from '../flota/flota.service';
+import { Vehiculo } from '../flota/vehiculo.entity';
 
 import {
   ROLES,
@@ -38,6 +39,8 @@ export class AuthService {
     private readonly flotaService: FlotaService,
 
     private readonly jwtService: JwtService,
+
+    private readonly dataSource: DataSource,
   ) {}
 
   // ============================================================
@@ -481,11 +484,91 @@ export class AuthService {
   // CREAR CHOFER (SÓLO SECRETARÍA)
   // Forzosamente asigna el rol "chofer".
   // No permite crear cuentas de secretaria (reforzado en backend).
+  // Todas las escrituras están dentro de una transacción PostgreSQL
+  // para evitar registros parciales si algo falla a mitad del
+  // proceso.
   // ============================================================
 
   async crearChofer(data: CrearChoferDto) {
-    let placaAsignada: string | undefined;
+    // ----------------------------------------------------------
+    // FASE 1: VALIDACIONES PREVIAS (solo lecturas, sin INSERT)
+    // Si cualquiera de estas falla, NO se crea nada en PostgreSQL.
+    // ----------------------------------------------------------
 
+    const nombreUsuario = data.nombreUsuario.trim();
+
+    if (nombreUsuario.length < 3) {
+      throw new BadRequestException(
+        'El nombre de usuario debe tener al menos 3 caracteres.',
+      );
+    }
+
+    if (data.password.length < 6) {
+      throw new BadRequestException(
+        'La contraseña debe tener al menos 6 caracteres.',
+      );
+    }
+
+    if (!esRolValido(ROLES.CHOFER)) {
+      throw new BadRequestException(
+        'El rol especificado no es válido.',
+      );
+    }
+
+    // Verificar nombre de usuario duplicado
+    const existeUsuario = await this.usuarioRepo.findOne({
+      where: { nombreUsuario },
+    });
+    if (existeUsuario) {
+      throw new BadRequestException(
+        'El nombre de usuario ya está registrado. Elija otro.',
+      );
+    }
+
+    // Verificar correo duplicado
+    let gmail: string | undefined;
+    if (data.gmail) {
+      gmail = data.gmail.trim().toLowerCase();
+      const existeGmail = await this.usuarioRepo.findOne({
+        where: { gmail },
+      });
+      if (existeGmail) {
+        throw new BadRequestException(
+          'El correo electrónico ya se encuentra registrado.',
+        );
+      }
+    }
+
+    // Verificar teléfono duplicado
+    let telefono: string | undefined;
+    if (data.telefono) {
+      telefono = data.telefono.trim();
+      const existeTelefono = await this.usuarioRepo.findOne({
+        where: { telefono },
+      });
+      if (existeTelefono) {
+        throw new BadRequestException(
+          'El número de teléfono ya está registrado con otra cuenta.',
+        );
+      }
+    }
+
+    // Verificar CI duplicado
+    let ci: string | undefined;
+    if (data.ci) {
+      ci = data.ci.trim();
+      const existeCi = await this.usuarioRepo.findOne({
+        where: { ci },
+      });
+      if (existeCi) {
+        throw new BadRequestException(
+          'El número de CI ya está registrado con otra cuenta.',
+        );
+      }
+    }
+
+    // Verificar placa duplicada
+    let placaAsignada: string | undefined;
     if (data.placa && data.capacidadTotal) {
       const existente = await this.flotaService.buscarPorPlaca(data.placa);
       if (existente) {
@@ -493,32 +576,77 @@ export class AuthService {
           `La placa ${data.placa} ya está registrada a otro vehículo.`,
         );
       }
-
-      const nombreCompleto =
-        [data.nombre, data.apellidos].filter(Boolean).join(' ').trim() ||
-        data.nombreUsuario;
-
-      await this.flotaService.crearVehiculo({
-        choferNombre: nombreCompleto,
-        choferCi: data.ci,
-        tipoVehiculo: data.tipoVehiculo || 'Trufi',
-        color: data.color || 'N/D',
-        placa: data.placa,
-        capacidadTotal: data.capacidadTotal,
-        paradaActual: 'cochabamba',
-      });
-
       placaAsignada = data.placa;
     }
 
-    const usuario = await this.crearUsuarioInterno({
-      ...data,
-      rol: ROLES.CHOFER,
-      estado: 'activo',
-      placaAsignada,
-    });
+    // ----------------------------------------------------------
+    // FASE 2: ESCRITURA ATÓMICA dentro de una transacción
+    // Si cualquier INSERT falla, TODO se revierte (rollback).
+    // ----------------------------------------------------------
 
-    return this.usuarioSeguro(usuario);
+    const resultado = await this.dataSource.transaction(
+      async (manager: EntityManager) => {
+        const usuarioRepo = manager.getRepository(Usuario);
+
+        // Hashear contraseña (operación CPU, no DB — segura fuera,
+        // pero la dejamos aquí para mantener todo junto).
+        let passwordHash: string | undefined;
+        if (data.password) {
+          passwordHash = await bcrypt.hash(data.password, 10);
+        }
+
+        // 1. Crear usuario
+        const usuario = usuarioRepo.create({
+          nombreUsuario,
+          nombre: data.nombre?.trim() || undefined,
+          apellidos: data.apellidos?.trim() || undefined,
+          gmail,
+          telefono,
+          ci,
+          passwordHash,
+          rol: ROLES.CHOFER,
+          // Nuevo chofer registrado por la Secretaría: estado INICIAL INACTIVO.
+          // El chofer debe activar su estado de servicio desde su panel.
+          estado: 'inactivo',
+          placaAsignada: placaAsignada || undefined,
+        });
+        const usuarioGuardado = await usuarioRepo.save(usuario);
+
+        // 2. Crear vehículo (si se proporcionaron datos del vehículo)
+        if (data.placa && data.capacidadTotal) {
+          const nombreCompleto =
+            [data.nombre, data.apellidos].filter(Boolean).join(' ').trim() ||
+            nombreUsuario;
+
+          await this.flotaService.crearVehiculo(
+            {
+              choferNombre: nombreCompleto,
+              choferCi: ci,
+              tipoVehiculo: data.tipoVehiculo || 'Trufi',
+              color: data.color || 'N/D',
+              placa: data.placa,
+              capacidadTotal: data.capacidadTotal,
+              // El chofer nuevo es INACTIVO y no puede estar en la fila:
+              // el vehículo se crea fuera de la fila y solo entra cuando el
+              // chofer (ACTIVO) se anota voluntariamente.
+              paradaActual: 'fuera_de_fila',
+              filas: data.filas,
+              asientosChofer: data.asientosChofer,
+            },
+            manager,
+          );
+        }
+
+        return usuarioGuardado;
+      },
+    );
+
+    // Notificar a los clientes conectados DESPUÉS del commit exitoso
+    if (placaAsignada) {
+      this.flotaService.notificarFlota();
+    }
+
+    return this.usuarioSeguro(resultado);
   }
 
   // ============================================================
@@ -556,7 +684,9 @@ export class AuthService {
     }
 
     usuario.rol = ROLES.CHOFER;
-    usuario.estado = 'activo';
+    // Al asignar rol de chofer a un usuario existente, su estado de servicio
+    // comienza como INACTIVO. El chofer debe activarlo desde su panel.
+    usuario.estado = 'inactivo';
 
     await this.usuarioRepo.save(usuario);
 
