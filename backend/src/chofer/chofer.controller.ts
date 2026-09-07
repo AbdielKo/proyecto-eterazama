@@ -8,13 +8,35 @@ import {
   Query,
   UseGuards,
   Request,
+  Res,
 } from '@nestjs/common';
+import type { Request as ExpressRequest } from 'express';
+import type { Response } from 'express';
 
 import { ChoferService } from './chofer.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { ROLES } from '../auth/roles';
+import { VentaManualChoferDto } from './dto/venta-manual-chofer.dto';
+import { ActorAuditoria } from '../auditoria/auditoria.service';
+
+// Actor autenticado derivado del JWT para la bitácora de auditoría.
+function actorDeReq(req: ExpressRequest): ActorAuditoria {
+  const u = (req.user || {}) as {
+    userId?: string;
+    id?: string;
+    username?: string;
+    nombreUsuario?: string;
+    rol?: string;
+  };
+  return {
+    usuarioId: u.userId || u.id || 'desconocido',
+    usuarioNombre: u.username || u.nombreUsuario || 'desconocido',
+    rol: u.rol || ROLES.CHOFER,
+    ip: (req as any).ip || null,
+  };
+}
 
 @Controller('chofer')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -134,6 +156,55 @@ export class ChoferController {
     contactoRecibo?: string;
   }) {
     return this.choferService.ventaManual(req.user.userId, body);
+  }
+
+
+  // =============================================================
+  // Venta manual del CHOFER (sin QR, solo EFECTIVO)
+  // =============================================================
+  // Reutiliza el MISMO núcleo de venta de la boletería de Secretaría: el
+  // precio lo calcula el backend desde la configuración oficial, el vehículo
+  // es SIEMPRE el asignado al chofer del JWT, y el pago es EFECTIVO a la
+  // fuerza. La venta queda en Ventas y Caja, en el historial, en los asientos
+  // ocupados y en la auditoría (actor = CHOFER).
+  //
+  // 1) Datos para la pantalla: vehículo + asientos + precios + motivos.
+  @Get('venta-manual')
+  obtenerDatosVentaManual(@Request() req: any) {
+    return this.choferService.obtenerDatosVentaManual(req.user.userId);
+  }
+
+  // 2) Registrar la venta manual.
+  @Post('venta-manual')
+  realizarVentaManual(
+    @Request() req: any,
+    @Body() dto: VentaManualChoferDto,
+  ) {
+    return this.choferService.ventaManualChofer(
+      req.user.userId,
+      dto,
+      actorDeReq(req),
+    );
+  }
+
+  // 3) Recibo PDF de una venta de ESTE chofer (validación de propiedad por
+  // placa). Generado por el sistema, no es una captura de pantalla.
+  @Get('venta-manual/:id/pdf')
+  async obtenerReciboPdf(
+    @Request() req: any,
+    @Param('id') id: string,
+    @Res() res: Response,
+  ) {
+    const buffer = await this.choferService.obtenerReciboPdf(
+      req.user.userId,
+      id,
+    );
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="recibo-${id.substring(0, 8)}.pdf"`,
+      'Content-Length': buffer.length,
+    });
+    res.end(buffer);
   }
 
 

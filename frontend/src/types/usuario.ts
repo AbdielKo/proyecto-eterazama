@@ -14,6 +14,10 @@ export interface Usuario {
   rol: Rol;
   placaAsignada?: string;
   fotoUrl?: string;
+  intentosFallidos?: number;
+  nivelBloqueo?: number;
+  bloqueoTemporalHasta?: string | null;
+  cuentaBloqueada?: boolean;
 }
 
 

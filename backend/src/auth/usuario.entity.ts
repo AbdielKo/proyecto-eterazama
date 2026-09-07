@@ -64,6 +64,18 @@ export class Usuario {
   })
   passwordHash: string | null;
 
+  @Column({ type: 'int', default: 0 })
+  intentosFallidos: number;
+
+  @Column({ type: 'int', default: 0 })
+  nivelBloqueo: number;
+
+  @Column({ type: 'timestamptz', nullable: true, select: true })
+  bloqueoTemporalHasta: Date | null;
+
+  @Column({ type: 'boolean', default: false })
+  cuentaBloqueada: boolean;
+
   @Column({
     type: 'varchar',
     default: ROLES.USUARIO,

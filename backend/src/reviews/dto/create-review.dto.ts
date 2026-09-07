@@ -11,8 +11,10 @@ import {
 export class CreateReviewDto {
 
 
+  // Informativo: el backend SIEMPRE usa el usuario autenticado del JWT.
+  @IsOptional()
   @IsUUID()
-  usuarioId:string;
+  usuarioId?:string;
 
 
   @IsInt()

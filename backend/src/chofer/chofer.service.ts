@@ -20,6 +20,10 @@ import { FlotaGateway } from '../flota/flota.gateway';
 import { normalizarConfiguracionAsientos, obtenerAsientosDistribuidos } from '../flota/asientos-config.util';
 import { ROLES } from '../auth/roles';
 import { SalidasService } from '../salidas/salidas.service';
+import { SecretariaService } from '../secretaria/secretaria.service';
+import { PdfService } from '../pasajes/pdf.service';
+import { VentaManualChoferDto } from './dto/venta-manual-chofer.dto';
+import { ActorAuditoria } from '../auditoria/auditoria.service';
 import {
   reindexarFilaOficial,
   obtenerSiguientePuesto,
@@ -67,6 +71,10 @@ export class ChoferService {
     private readonly solicitudRetiroRepo: Repository<SolicitudRetiro>,
 
     private readonly salidasService: SalidasService,
+
+    private readonly secretariaService: SecretariaService,
+
+    private readonly pdfService: PdfService,
   ) {}
 
 
@@ -1103,13 +1111,37 @@ export class ChoferService {
     };
   }
 
+  // Placa del chofer autenticado (JWT): base de todas las validaciones de
+  // propiedad sobre viajes y boletos.
+  private async obtenerUsuarioAsignado(choferId: string) {
+    const usuario = await this.usuarioRepo.findOne({
+      where: { id: choferId },
+    });
+
+    if (!usuario || !usuario.placaAsignada) {
+      throw new NotFoundException('No tiene vehiculo asignado');
+    }
+
+    return usuario;
+  }
+
   async iniciarViaje(choferId: string, viajeId: string) {
+    const usuario = await this.obtenerUsuarioAsignado(choferId);
+
     const viaje = await this.viajeRepo.findOne({
       where: { id: viajeId },
     });
 
     if (!viaje) {
       throw new NotFoundException('Viaje no encontrado');
+    }
+
+    // Regla de propiedad: solo el chofer del MISMO vehículo puede gestionar
+    // este viaje.
+    if (viaje.placaVehiculo !== usuario.placaAsignada) {
+      throw new BadRequestException(
+        `Este viaje corresponde al vehículo ${viaje.placaVehiculo}, no al suyo (${usuario.placaAsignada}).`,
+      );
     }
 
     viaje.estado = 'en_ruta';
@@ -1122,12 +1154,22 @@ export class ChoferService {
   }
 
   async finalizarViaje(choferId: string, viajeId: string) {
+    const usuario = await this.obtenerUsuarioAsignado(choferId);
+
     const viaje = await this.viajeRepo.findOne({
       where: { id: viajeId },
     });
 
     if (!viaje) {
       throw new NotFoundException('Viaje no encontrado');
+    }
+
+    // Regla de propiedad: solo el chofer del MISMO vehículo puede finalizar
+    // este viaje.
+    if (viaje.placaVehiculo !== usuario.placaAsignada) {
+      throw new BadRequestException(
+        `Este viaje corresponde al vehículo ${viaje.placaVehiculo}, no al suyo (${usuario.placaAsignada}).`,
+      );
     }
 
     // Operación atómica: se bloquea el vehículo PRIMERO (pessimistic_write),
@@ -1241,12 +1283,22 @@ export class ChoferService {
   }
 
   async confirmarAbordaje(choferId: string, boletoId: string) {
+    const usuario = await this.obtenerUsuarioAsignado(choferId);
+
     const boleto = await this.boletoRepo.findOne({
       where: { id: boletoId },
     });
 
     if (!boleto) {
       throw new NotFoundException('Boleto no encontrado');
+    }
+
+    // Regla de propiedad: solo el chofer del MISMO vehículo puede gestionar
+    // el boleto.
+    if (boleto.placaVehiculo !== usuario.placaAsignada) {
+      throw new BadRequestException(
+        `Este boleto corresponde al vehículo ${boleto.placaVehiculo}, no al suyo (${usuario.placaAsignada}).`,
+      );
     }
 
     boleto.estadoBoleto = 'abordado';
@@ -1257,12 +1309,22 @@ export class ChoferService {
   }
 
   async marcarNoPresentado(choferId: string, boletoId: string) {
+    const usuario = await this.obtenerUsuarioAsignado(choferId);
+
     const boleto = await this.boletoRepo.findOne({
       where: { id: boletoId },
     });
 
     if (!boleto) {
       throw new NotFoundException('Boleto no encontrado');
+    }
+
+    // Regla de propiedad: solo el chofer del MISMO vehículo puede gestionar
+    // el boleto.
+    if (boleto.placaVehiculo !== usuario.placaAsignada) {
+      throw new BadRequestException(
+        `Este boleto corresponde al vehículo ${boleto.placaVehiculo}, no al suyo (${usuario.placaAsignada}).`,
+      );
     }
 
     boleto.estadoBoleto = 'no_presentado';
@@ -1331,6 +1393,223 @@ export class ChoferService {
     };
   }
 
+  // Pantalla de venta manual del chofer: reutiliza el mapa de asientos del
+  // vehículo del chofer (JWT) y suma los precios oficiales vigentes (mismo
+  // origen que el núcleo de venta). También devuelve la fila/puesto REAL con la
+  // MISMA fuente oficial del proyecto (calcularPuestosFila) y el sentido de
+  // venta permitido (derivado de la parada actual), de modo que el frontend
+  // solo muestra datos y el backend decide el sentido en la venta.
+  async obtenerDatosVentaManual(choferId: string) {
+    const usuario = await this.usuarioRepo.findOne({
+      where: { id: choferId },
+    });
+
+    if (!usuario) {
+      throw new NotFoundException('Chofer no encontrado.');
+    }
+
+    const vehiculo = usuario.placaAsignada
+      ? await this.vehiculoRepo.findOne({
+          where: { placa: usuario.placaAsignada },
+        })
+      : null;
+
+    const mapa = vehiculo
+      ? await this.obtenerMapaAsientos(choferId)
+      : null;
+
+    // Puesto REAL con la fuente oficial compartida (la misma de obtenerMiFila
+    // y reindexarFilaOficial). Nunca se expone un valor histórico.
+    let puestoReal = vehiculo ? vehiculo.puestoFila || 0 : 0;
+    if (vehiculo && vehiculo.paradaActual) {
+      const todos = await this.vehiculoRepo.find({
+        order: { puestoFila: 'ASC' },
+      });
+      const oficiales = await this.usuarioRepo.find({
+        where: { rol: ROLES.CHOFER, estado: 'activo' },
+        select: { placaAsignada: true },
+      });
+      const placas = new Set(
+        oficiales
+          .map((c) => c.placaAsignada)
+          .filter((p): p is string => !!p),
+      );
+      puestoReal =
+        calcularPuestosFila(todos, vehiculo.paradaActual, placas).get(
+          vehiculo.placa,
+        ) ?? 0;
+    }
+
+    const parada = vehiculo ? vehiculo.paradaActual : null;
+    const esParadaValida = parada === 'cochabamba' || parada === 'eterazama';
+    const sentido =
+      parada === 'cochabamba'
+        ? { tramo: 'cochabamba', origen: 'Cochabamba', destino: 'Eterazama' }
+        : parada === 'eterazama'
+          ? { tramo: 'eterazama', origen: 'Eterazama', destino: 'Cochabamba' }
+          : null;
+
+    const motivos = this.validarReglasVentaChofer(
+      usuario,
+      vehiculo,
+      puestoReal,
+    );
+
+    return {
+      chofer: {
+        id: usuario.id,
+        nombreUsuario: usuario.nombreUsuario,
+        nombre: usuario.nombre,
+        apellidos: usuario.apellidos,
+        estado: usuario.estado,
+        placaAsignada: usuario.placaAsignada,
+      },
+      vehiculo: vehiculo
+        ? {
+            id: vehiculo.id,
+            placa: vehiculo.placa,
+            tipoVehiculo: vehiculo.tipoVehiculo,
+            color: vehiculo.color,
+            capacidadTotal: Math.max(4, vehiculo.capacidadTotal || 12),
+            estadoVehiculo: vehiculo.estadoVehiculo,
+            estadoViaje: vehiculo.estadoViaje,
+            paradaActual: vehiculo.paradaActual,
+            puestoFila: puestoReal,
+            asientosOcupados: vehiculo.asientosOcupados || [],
+            asientosChofer: vehiculo.asientosChofer || [],
+            configuracionAsientos: normalizarConfiguracionAsientos(
+              vehiculo.configuracionAsientos,
+              Math.max(4, vehiculo.capacidadTotal || 12),
+            ),
+            mapa: mapa?.asientos || [],
+          }
+        : null,
+      precios: await this.secretariaService.obtenerPreciosVenta(),
+      sentido,
+      permiteVenta: motivos.length === 0 && esParadaValida,
+      motivos,
+    };
+  }
+
+  // Motivos (en texto) que impiden la venta manual en este momento. Si se
+  // devuelve una lista vacía, el chofer puede vender. Estas son las MISMAS
+  // reglas que revalida el backend dentro de la transacción de venta: se
+  // muestran al chofer ANTES de la venta y no se confía en ellas.
+  private validarReglasVentaChofer(
+    usuario: Usuario,
+    vehiculo: Vehiculo | null,
+    puestoReal: number,
+  ) {
+    const motivos: string[] = [];
+
+    if (!usuario || !vehiculo) {
+      motivos.push('No tienes un vehículo asignado.');
+      return motivos;
+    }
+
+    if (usuario.estado !== 'activo') {
+      motivos.push(
+        'No puedes vender boletos porque tu estado de servicio está INACTIVO.',
+      );
+    }
+
+    if (
+      vehiculo.estadoVehiculo === 'inactivo' ||
+      vehiculo.estadoViaje === 'mantenimiento'
+    ) {
+      motivos.push(
+        `Tu vehículo está fuera de servicio (${vehiculo.estadoVehiculo === 'inactivo' ? 'inactivo' : 'mantenimiento'}); no puede vender pasajes.`,
+      );
+    }
+
+    if (vehiculo.estadoViaje === 'por_salir') {
+      motivos.push('Tu vehículo está POR SALIR y ya no recibe ventas.');
+    }
+
+    if (
+      vehiculo.paradaActual !== 'cochabamba' &&
+      vehiculo.paradaActual !== 'eterazama'
+    ) {
+      motivos.push(
+        'No puedes vender boletos porque no estás anotado en ninguna fila.',
+      );
+    } else if (!(puestoReal > 0)) {
+      motivos.push(
+        'No puedes vender boletos porque no estás anotado en ninguna fila.',
+      );
+    } else if (puestoReal !== 1) {
+      motivos.push(
+        `No puedes vender boletos porque actualmente ocupas el puesto #${puestoReal} de la fila. Solo el primero de la fila puede vender.`,
+      );
+    }
+
+    return motivos;
+  }
+
+  // Venta manual del chofer: delega en el MISMO núcleo de venta que la
+  // boletería de secretaría (precios, fila, asientos, ocupados, salida) y
+  // registra la auditoría con la identidad del chofer (JWT). El frontend jamás
+  // envía precios, vehículo ni método de pago.
+  async ventaManualChofer(
+    choferId: string,
+    dto: VentaManualChoferDto,
+    actor: ActorAuditoria,
+  ) {
+    return this.secretariaService.ventaManualChofer(dto, actor, choferId);
+  }
+
+  // Genera el recibo PDF de un pasaje vendido por ESTE chofer (solo permite
+  // descargar pasajes de su propio vehículo según el JWT). Reutiliza el mismo
+  // generador de comprobantes en PDF del sistema.
+  async obtenerReciboPdf(choferId: string, pasajeId: string) {
+    const usuario = await this.usuarioRepo.findOne({
+      where: { id: choferId },
+    });
+    if (!usuario || !usuario.placaAsignada) {
+      throw new NotFoundException('No tienes un vehículo asignado.');
+    }
+
+    const pasaje = await this.pasajeRepo.findOne({
+      where: { id: pasajeId },
+    });
+
+    if (!pasaje) {
+      throw new NotFoundException('Pasaje no encontrado.');
+    }
+
+    if (pasaje.placaVehiculo !== usuario.placaAsignada) {
+      throw new BadRequestException(
+        'No puedes descargar este recibo: no fue vendido en tu vehículo.',
+      );
+    }
+
+    return this.pdfService.generarComprobantePasaje(pasaje);
+  }
+
+  // Precio oficial del tramo (según origen/destino) para que el monto de una
+  // venta manual NUNCA pueda ser menor al precio oficial del sindicato.
+  private async obtenerPrecioOficialTramo(origen?: string, destino?: string) {
+    const precios = await this.secretariaService.obtenerPreciosVenta();
+
+    const desde = (origen || '').trim().toLowerCase();
+    const hasta = (destino || '').trim().toLowerCase();
+
+    if (desde.includes('cochabamba') && hasta.includes('eterazama')) {
+      return Number(precios.cochabamba);
+    }
+    if (desde.includes('eterazama') && hasta.includes('cochabamba')) {
+      return Number(precios.eterazama);
+    }
+
+    const texto = `${desde} ${hasta}`;
+    if (texto.includes('cochabamba')) return Number(precios.cochabamba);
+    if (texto.includes('eterazama')) return Number(precios.eterazama);
+
+    throw new BadRequestException(
+      'No se pudo determinar el tramo de la venta para validar el precio oficial.',
+    );
+  }
+
   async ventaManual(choferId: string, data: {
     pasajeroNombre: string;
     asiento: number;
@@ -1357,6 +1636,26 @@ export class ChoferService {
 
     const placa = usuario.placaAsignada;
 
+    // El monto de una venta manual NO puede ser arbitrario: se valida contra
+    // el precio oficial del tramo y se rechazan montos negativos/cero.
+    const precioOficial = await this.obtenerPrecioOficialTramo(
+      data.origen,
+      data.destino,
+    );
+    const monto = Number(data.monto);
+    const montoEncomienda = Number(data.montoEncomienda || 0);
+
+    if (!Number.isFinite(monto) || monto < precioOficial) {
+      throw new BadRequestException(
+        `El monto del boleto no puede ser menor al precio oficial del tramo (Bs ${precioOficial}).`,
+      );
+    }
+    if (!Number.isFinite(montoEncomienda) || montoEncomienda < 0) {
+      throw new BadRequestException(
+        'El monto de la encomienda no puede ser negativo.',
+      );
+    }
+
     // Operación atómica: se bloquea el vehículo PRIMERO (pessimistic_write),
     // se releen sus asientosOcupados/asientosChofer desde PostgreSQL bajo ese
     // lock y se validan contra ese estado real. Solo entonces se crea el
@@ -1379,6 +1678,17 @@ export class ChoferService {
 
         if (!vehiculo) {
           throw new NotFoundException('No tiene vehiculo asignado');
+        }
+
+        // Rango permitido de asientos: 1..capacidad real del vehículo.
+        if (
+          !Number.isInteger(data.asiento) ||
+          data.asiento < 1 ||
+          data.asiento > vehiculo.capacidadTotal
+        ) {
+          throw new BadRequestException(
+            `El asiento ${data.asiento} está fuera del rango permitido (1-${vehiculo.capacidadTotal}).`,
+          );
         }
 
         // Un vehículo POR SALIR ya no recibe ventas: le queda solo partir.
@@ -1550,12 +1860,22 @@ export class ChoferService {
   }
 
   async confirmarAbordajeQR(choferId: string, boletoId: string) {
+    const usuario = await this.obtenerUsuarioAsignado(choferId);
+
     const boleto = await this.boletoRepo.findOne({
       where: { id: boletoId },
     });
 
     if (!boleto) {
       throw new NotFoundException('Boleto no encontrado');
+    }
+
+    // Regla de propiedad: solo el chofer del MISMO vehículo puede gestionar
+    // el boleto.
+    if (boleto.placaVehiculo !== usuario.placaAsignada) {
+      throw new BadRequestException(
+        `Este boleto corresponde al vehículo ${boleto.placaVehiculo}, no al suyo (${usuario.placaAsignada}).`,
+      );
     }
 
     if (boleto.escaneado) {

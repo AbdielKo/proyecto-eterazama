@@ -4,7 +4,7 @@ import { useTheme } from "../hooks/useTheme";
 import {
   Bus, Home, Car, Users, QrCode,
   Route, History, BarChart3,
-  Bell, User, LogOut, Sun, Moon, ChevronDown, ChevronRight
+  Bell, User, LogOut, Sun, Moon, ChevronDown, ChevronRight, Ticket
 } from "lucide-react";
 import { useState } from "react";
 
@@ -12,6 +12,7 @@ const menuItems = [
   { to: "/chofer", label: "Inicio", icon: Home },
   { to: "/chofer/vehiculo", label: "Mi vehiculo", icon: Car },
   { to: "/chofer/fila", label: "Mi fila", icon: Users },
+  { to: "/chofer/venta-manual", label: "Venta manual", icon: Ticket },
   { to: "/chofer/escanear-qr", label: "Escanear boleto QR", icon: QrCode },
   { to: "/chofer/estado-viaje", label: "Estado del viaje", icon: Route },
   { to: "/chofer/historial", label: "Historial de viajes", icon: History },

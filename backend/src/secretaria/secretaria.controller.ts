@@ -22,6 +22,27 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { ROLES } from '../auth/roles';
+import { ActorAuditoria } from '../auditoria/auditoria.service';
+
+interface ReqUsuario {
+  userId?: string;
+  id?: string;
+  username?: string;
+  nombreUsuario?: string;
+  rol?: string;
+}
+
+// Deriva de forma segura el actor autenticado (desde el JWT) para la
+// bitácora de auditoría. Nunca se confía en datos enviados por el frontend.
+function actorDeReq(req: Request): ActorAuditoria {
+  const u = (req.user || {}) as ReqUsuario;
+  return {
+    usuarioId: u.userId || u.id || 'desconocido',
+    usuarioNombre: u.username || u.nombreUsuario || 'desconocido',
+    rol: u.rol || ROLES.SECRETARIA,
+    ip: (req as any).ip || null,
+  };
+}
 
 @Controller('secretaria')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -96,6 +117,7 @@ export class SecretariaController {
       id,
       body.motivo,
       secretaria,
+      actorDeReq(req),
     );
   }
 
@@ -129,8 +151,8 @@ export class SecretariaController {
 
   // Guardar configuración (precios oficiales de pasajes)
   @Put('configuracion')
-  actualizarConfiguracion(@Body() body: ActualizarConfiguracionDto) {
-    return this.secretariaService.actualizarConfiguracion(body);
+  actualizarConfiguracion(@Body() body: ActualizarConfiguracionDto, @Req() req: Request) {
+    return this.secretariaService.actualizarConfiguracion(body, actorDeReq(req));
   }
 
   // Paradas principales (Cochabamba / Eterazama) con sus vehículos reales
@@ -147,8 +169,8 @@ export class SecretariaController {
 
   // Venta en ventanilla (pago en efectivo). Valida disponibilidad en backend.
   @Post('boleteria/venta')
-  venderBoleteria(@Body() body: VentaBoleteriaDto) {
-    return this.secretariaService.venderBoleteria(body);
+  venderBoleteria(@Body() body: VentaBoleteriaDto, @Req() req: Request) {
+    return this.secretariaService.venderBoleteria(body, actorDeReq(req));
   }
 
   // =============================================================
@@ -161,14 +183,14 @@ export class SecretariaController {
   }
 
   @Patch('retiros/:id/aprobar')
-  aprobarRetiro(@Param('id') id: string, @Req() req: any, @Body('comentario') comentario?: string) {
-    const nombre = req.user?.username || req.user?.userId || 'Secretaria';
-    return this.secretariaService.aprobarRetiro(id, nombre, comentario);
+  aprobarRetiro(@Param('id') id: string, @Req() req: Request, @Body('comentario') comentario?: string) {
+    const nombre = (req.user as ReqUsuario)?.username || (req.user as ReqUsuario)?.userId || 'Secretaria';
+    return this.secretariaService.aprobarRetiro(id, nombre, comentario, actorDeReq(req));
   }
 
   @Patch('retiros/:id/rechazar')
-  rechazarRetiro(@Param('id') id: string, @Req() req: any, @Body('comentario') comentario?: string) {
-    const nombre = req.user?.username || req.user?.userId || 'Secretaria';
-    return this.secretariaService.rechazarRetiro(id, nombre, comentario);
+  rechazarRetiro(@Param('id') id: string, @Req() req: Request, @Body('comentario') comentario?: string) {
+    const nombre = (req.user as ReqUsuario)?.username || (req.user as ReqUsuario)?.userId || 'Secretaria';
+    return this.secretariaService.rechazarRetiro(id, nombre, comentario, actorDeReq(req));
   }
 }

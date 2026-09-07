@@ -587,6 +587,34 @@ export class FlotaService {
     const vehiculo = await this.obtenerPorId(id);
     const paradaOriginal = vehiculo.paradaActual;
 
+    // Validación de campos manipulables antes de aplicar cambios.
+    if (
+      data.puestoFila !== undefined &&
+      (!Number.isInteger(data.puestoFila) || data.puestoFila < 0)
+    ) {
+      throw new BadRequestException(
+        'El puesto en la fila debe ser un número entero mayor o igual a cero.',
+      );
+    }
+    if (
+      data.paradaActual !== undefined &&
+      !['cochabamba', 'eterazama', 'fuera_de_fila', 'en_ruta'].includes(
+        data.paradaActual,
+      )
+    ) {
+      throw new BadRequestException(
+        'Parada no válida. Use cochabamba, eterazama o fuera_de_fila.',
+      );
+    }
+    if (
+      data.estadoVehiculo !== undefined &&
+      !['activo', 'inactivo'].includes(data.estadoVehiculo)
+    ) {
+      throw new BadRequestException(
+        'Estado del vehículo no válido. Use activo o inactivo.',
+      );
+    }
+
     if (data.choferNombre !== undefined) vehiculo.choferNombre = data.choferNombre;
     if (data.choferCi !== undefined) vehiculo.choferCi = data.choferCi ?? null;
     if (data.tipoVehiculo !== undefined) vehiculo.tipoVehiculo = data.tipoVehiculo;

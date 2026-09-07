@@ -184,3 +184,49 @@ export interface PerfilChofer {
   placaAsignada: string | null;
   fechaRegistro: string;
 }
+
+// Pantalla de venta manual del chofer (GET /chofer/venta-manual).
+export interface DatosVentaManualChofer {
+  chofer: {
+    id: string;
+    nombreUsuario: string;
+    nombre: string | null;
+    apellidos: string | null;
+    estado: string;
+    placaAsignada: string | null;
+  };
+  vehiculo: {
+    id: number;
+    placa: string;
+    tipoVehiculo: string;
+    color: string;
+    capacidadTotal: number;
+    estadoVehiculo: string;
+    estadoViaje: string;
+    paradaActual: string;
+    puestoFila: number;
+    asientosOcupados: number[];
+    asientosChofer: number[];
+    configuracionAsientos: { ancho: number; filas: (number | null)[][] } | null;
+    mapa: { numero: number; estado: string; pasajero: string | null; destino: string | null }[];
+  } | null;
+  precios: {
+    cochabamba: number;
+    eterazama: number;
+  };
+  // Sentido de venta ÚNICO permitido, derivado por el backend de la fila:
+  // cochabamba -> Cbba→Eterazama; eterazama -> Eter→Cbba. El frontend solo
+  // muestra estos datos; el backend decide el tramo en la venta.
+  sentido: { tramo: "cochabamba" | "eterazama"; origen: string; destino: string } | null;
+  permiteVenta: boolean;
+  motivos: string[];
+}
+
+export interface VentaManualSolicitud {
+  asientos: number[];
+  pasajeros: { asiento: number; nombre: string; ci?: string; telefono?: string }[];
+  // Único dato del recibo que pide el chofer: celular del pasajero (8 dígitos).
+  // Es el número de destino del recibo por WhatsApp.
+  celular: string;
+  montoEncomienda?: number;
+}

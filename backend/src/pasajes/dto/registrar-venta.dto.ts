@@ -1,10 +1,8 @@
-import { IsNumber, IsString, IsNotEmpty, IsArray, IsOptional } from 'class-validator';
+import { IsArray, IsInt, IsNumber, IsString, IsNotEmpty, IsOptional, Min } from 'class-validator';
 
 export class RegistrarVentaDto {
-  // Identificador del vehículo (si el cliente lo envía). Si no viene,
-  // se resuelve por placaVehiculo.
   @IsOptional()
-  @IsNumber()
+  @IsInt()
   vehiculoId?: number;
 
   @IsString()
@@ -16,15 +14,25 @@ export class RegistrarVentaDto {
   placaVehiculo: string;
 
   @IsArray()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
   asientos: number[];
 
+  // Campos de compatibilidad con la compra pública existente: se aceptan para
+  // no romper el flujo del pasajero, pero el backend NUNCA los usa como
+  // fuente de verdad (precios y montos se recalculan desde la configuración).
+  // El ValidationPipe global tiene whitelist + forbidNonWhitelisted: cualquier
+  // campo que no esté declarado aquí (rol, usuarioId, vendedorId, estadoBoleto,
+  // etc.) es rechazado.
+  @IsOptional()
   @IsNumber()
-  montoAsientos: number;
+  montoAsientos?: number;
 
+  @IsOptional()
   @IsNumber()
-  montoEncomienda: number;
+  @Min(0)
+  montoEncomienda?: number;
 
-  // Solo informativo: el backend siempre recalcula montoTotal.
   @IsOptional()
   @IsNumber()
   montoTotal?: number;

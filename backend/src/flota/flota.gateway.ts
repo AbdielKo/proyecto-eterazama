@@ -1,8 +1,6 @@
 import {
   WebSocketGateway,
   WebSocketServer,
-  SubscribeMessage,
-  MessageBody,
 } from '@nestjs/websockets';
 import { Server } from 'socket.io';
 
@@ -15,14 +13,11 @@ export class FlotaGateway {
   @WebSocketServer()
   server: Server;
 
-  // Notificar a todos los clientes cuando cambie la fila o un asiento
+  // Única vía de emisión: el SERVIDOR la dispara cuando realmente cambia la
+  // fila o un asiento. Los clientes NO pueden pedir broadcasts (se eliminó el
+  // handler 'actualizarEstado' para evitar amplificación/DoS desde cualquier
+  // cliente anónimo conectado).
   notificarCambioFlota() {
     this.server.emit('flotaActualizada', { timestamp: new Date() });
-  }
-
-  // Escuchar eventos desde los clientes si fuera necesario
-  @SubscribeMessage('actualizarEstado')
-  handleActualizar(@MessageBody() data: any) {
-    this.notificarCambioFlota();
   }
 }

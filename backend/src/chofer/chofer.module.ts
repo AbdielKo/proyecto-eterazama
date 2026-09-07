@@ -14,11 +14,15 @@ import { Review } from '../reviews/review.entity';
 import { Usuario } from '../auth/usuario.entity';
 import { FlotaModule } from '../flota/flota.module';
 import { SalidasModule } from '../salidas/salidas.module';
+import { SecretariaModule } from '../secretaria/secretaria.module';
+import { PasajesModule } from '../pasajes/pasajes.module';
 
 @Module({
   imports: [
     FlotaModule,
     SalidasModule,
+    SecretariaModule,
+    PasajesModule,
     TypeOrmModule.forFeature([
       Vehiculo,
       TipoVehiculo,

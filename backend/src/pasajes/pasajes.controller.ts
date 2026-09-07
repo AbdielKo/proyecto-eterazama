@@ -19,6 +19,7 @@ export class PasajesController {
 
   // Venta pública. Si el comprador está autenticado (JWT opcional), el pasaje
   // se vincula a su cuenta (req.user.userId) y se le notifica la compra.
+  // El precio SIEMPRE lo calcula el backend: los montos del body se ignoran.
   @Post('venta')
   @UseGuards(OptionalJwtAuthGuard)
   registrarVenta(@Body() body: RegistrarVentaDto, @Req() req: Request) {
@@ -28,9 +29,20 @@ export class PasajesController {
     );
   }
 
+  // Historial protegido: los pasajeros solo ven sus propios pasajes.
   @Get('historial')
-  obtenerHistorial() {
-    return this.pasajesService.obtenerHistorial();
+  @UseGuards(JwtAuthGuard)
+  obtenerHistorial(@Req() req: Request) {
+    return this.pasajesService.obtenerHistorial(
+      req.user as { userId?: string; rol?: string },
+    );
+  }
+
+  // Precios oficiales vigentes para mostrar el total real antes de comprar.
+  @Get('precios')
+  @UseGuards(JwtAuthGuard)
+  obtenerPreciosOficiales() {
+    return this.pasajesService.obtenerPreciosOficiales();
   }
 
   // El usuario solicita cancelar su pasaje (queda PENDIENTE). No libera asiento.
@@ -50,23 +62,48 @@ export class PasajesController {
   }
 
   @Get('hoy')
-  obtenerVentasDelDia() {
-    return this.pasajesService.obtenerVentasDelDia();
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(ROLES.SECRETARIA)
+  obtenerVentasDelDia(@Req() req: Request) {
+    return this.pasajesService.obtenerVentasDelDia(
+      req.user as { userId?: string; rol?: string },
+    );
   }
 
   @Get('vehiculo/:placa')
-  obtenerPorPlaca(@Param('placa') placa: string) {
-    return this.pasajesService.obtenerPorPlaca(placa);
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(ROLES.SECRETARIA, ROLES.CHOFER)
+  obtenerPorPlaca(
+    @Param('placa') placa: string,
+    @Req() req: Request,
+  ) {
+    return this.pasajesService.obtenerPorPlaca(
+      placa,
+      req.user as { userId?: string; rol?: string },
+    );
   }
 
   @Get('cierre-caja')
-  obtenerCierreCaja() {
-    return this.pasajesService.obtenerCierreCaja();
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(ROLES.SECRETARIA)
+  obtenerCierreCaja(@Req() req: Request) {
+    return this.pasajesService.obtenerCierreCaja(
+      req.user as { userId?: string; rol?: string },
+    );
   }
 
+  // Comprobante PDF protegido: solo el dueño del pasaje o la Secretaría.
   @Get(':id/pdf')
-  async descargarPdf(@Param('id') id: string, @Res() res: Response) {
-    const pasaje = await this.pasajesService.obtenerPorId(id);
+  @UseGuards(JwtAuthGuard)
+  async descargarPdf(
+    @Param('id') id: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const pasaje = await this.pasajesService.obtenerPasajeAutorizado(
+      id,
+      req.user as { userId?: string; rol?: string },
+    );
     const pdfBuffer = await this.pdfService.generarComprobantePasaje(pasaje);
 
     res.set({

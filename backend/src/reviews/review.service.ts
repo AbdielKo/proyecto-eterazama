@@ -1,6 +1,7 @@
 import {
   Injectable,
-  BadRequestException
+  BadRequestException,
+  ForbiddenException
 } from '@nestjs/common';
 
 
@@ -10,13 +11,19 @@ import {
 
 
 import {
-  Repository
+  Repository,
+  IsNull
 } from 'typeorm';
 
 
 import {
   Vehiculo
 } from '../flota/vehiculo.entity';
+
+
+import {
+  Pasaje
+} from '../pasajes/pasaje.entity';
 
 
 import {
@@ -48,7 +55,14 @@ Repository<Review>,
 @InjectRepository(Vehiculo)
 
 private readonly vehiculoRepo:
-Repository<Vehiculo>
+Repository<Vehiculo>,
+
+
+
+@InjectRepository(Pasaje)
+
+private readonly pasajeRepo:
+Repository<Pasaje>
 
 
 ){}
@@ -56,30 +70,120 @@ Repository<Vehiculo>
 
 
 
-
+// usuarioId proviene SIEMPRE de req.user.userId (JWT), nunca del frontend.
 async crearReview(
 
-data:CreateReviewDto
+data:CreateReviewDto,
+
+usuarioId:string
 
 ){
 
 
 
-const existe =
+const vehiculo =
 
-await this.reviewRepo.findOne({
+await this.vehiculoRepo.findOne({
 
 where:{
 
-usuarioId:data.usuarioId,
-
-pasajeId:data.pasajeId
+id:data.vehiculoId
 
 }
 
 });
 
 
+if(!vehiculo){
+
+throw new BadRequestException(
+
+"El vehículo no existe"
+
+);
+
+}
+
+
+
+
+// Si se adjunta un pasaje debe existir, pertenecer al usuario autenticado
+// y corresponder al vehículo indicado. Sin pasaje, se valida identidad (JWT)
+// y se limita a una calificación por vehículo/sesión.
+
+if(data.pasajeId){
+
+const pasaje =
+
+await this.pasajeRepo.findOne({
+
+where:{
+
+id:data.pasajeId
+
+}
+
+});
+
+
+if(!pasaje){
+
+throw new BadRequestException(
+
+"El pasaje indicado no existe"
+
+);
+
+}
+
+
+if(!pasaje.pasajeroUsuarioId){
+
+throw new BadRequestException(
+
+"Este pasaje no está vinculado a tu cuenta y no se puede calificar."
+
+);
+
+}
+
+
+if(pasaje.pasajeroUsuarioId !== usuarioId){
+
+throw new ForbiddenException(
+
+"No puedes calificar el viaje de otra persona."
+
+);
+
+}
+
+
+if(pasaje.vehiculoId !== data.vehiculoId){
+
+throw new BadRequestException(
+
+"El pasaje no corresponde al vehículo seleccionado."
+
+);
+
+}
+
+}
+
+
+// Anti-duplicado: un solo voto por pasaje o por vehículo (sin pasaje).
+const existe =
+
+data.pasajeId
+
+? await this.reviewRepo.findOne({
+    where:{ usuarioId, pasajeId:data.pasajeId }
+  })
+
+: await this.reviewRepo.findOne({
+    where:{ usuarioId, vehiculoId:data.vehiculoId, pasajeId: IsNull() }
+  });
 
 
 if(existe){
@@ -95,23 +199,21 @@ throw new BadRequestException(
 
 
 
-
 const review =
 
 this.reviewRepo.create({
 
-usuarioId:data.usuarioId,
+usuarioId,
 
 vehiculoId:data.vehiculoId,
 
-pasajeId:data.pasajeId,
+pasajeId:data.pasajeId || undefined,
 
 estrellas:data.estrellas,
 
-comentario:data.comentario
+comentario:data.comentario || undefined
 
 });
-
 
 
 
@@ -127,7 +229,6 @@ review
 
 
 
-
 // Actualizar estrellas del trufi
 
 await this.actualizarPromedioVehiculo(
@@ -139,14 +240,10 @@ data.vehiculoId
 
 
 
-
 return guardada;
 
 
 }
-
-
-
 
 
 

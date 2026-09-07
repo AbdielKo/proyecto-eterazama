@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useAuth } from "../../hooks/useAuth";
 import { useLocation, useNavigate } from "react-router-dom";
 import { obtenerVehiculos } from "../../api/flota.api";
-import { registrarVenta } from "../../api/pasajes.api";
+import { registrarVenta, obtenerPrecios } from "../../api/pasajes.api";
 import type { Vehiculo } from "../../types/vehiculo";
 import DistribucionAsientos from "../../components/DistribucionAsientos";
 import { Car, CheckCircle, AlertCircle, QrCode, ArrowLeft, ArrowRight, User, Share2 } from "lucide-react";
@@ -30,10 +30,17 @@ export default function ComprarPasaje() {
     telefono: "",
   });
 
+  // Precios oficiales del sindicato (el backend cobra SIEMPRE este precio).
+  const [precios, setPrecios] = useState({
+    cochabamba: 20,
+    eterazama: 15,
+  });
+
   const [pasajeros, setPasajeros] = useState<Record<number, string>>({});
 
   useEffect(() => {
     obtenerVehiculos().then(setVehiculos).catch(console.error);
+    obtenerPrecios().then(setPrecios).catch(console.error);
   }, []);
 
   const disponibles = vehiculos.filter((v) => v.paradaActual === tramo);
@@ -50,7 +57,7 @@ export default function ComprarPasaje() {
     return { ancho: 3, filas };
   })();
   const ocupados = vehiculoSeleccionado?.asientosOcupados || [];
-  const precioUnitario = 5;
+  const precioUnitario = (precios as Record<string, number>)[tramo] || 0;
   const precioTotal = asientosSeleccionados.length * precioUnitario;
 
   function toggleAsiento(num: number) {

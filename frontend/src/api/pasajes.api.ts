@@ -44,6 +44,20 @@ return respuesta.data;
 
 
 
+// Precios oficiales vigentes (fuente: configuración del sindicato)
+export async function obtenerPrecios(){
+
+const respuesta =
+await axios.get(
+"/pasajes/precios"
+);
+
+return respuesta.data;
+
+}
+
+
+
 // Caja central
 export async function obtenerCaja(){
 

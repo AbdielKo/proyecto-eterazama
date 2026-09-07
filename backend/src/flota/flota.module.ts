@@ -8,6 +8,7 @@ import { SolicitudRetiro } from './solicitud-retiro.entity';
 import { Usuario } from '../auth/usuario.entity';
 import { Viaje } from '../chofer/entities/viaje.entity';
 import { FlotaGateway } from './flota.gateway';
+import { AuditoriaModule } from '../auditoria/auditoria.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { FlotaGateway } from './flota.gateway';
       Usuario,
       Viaje,
     ]),
+    AuditoriaModule,
   ],
   controllers: [FlotaController],
   providers: [FlotaService, FlotaGateway],

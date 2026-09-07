@@ -4,10 +4,13 @@ import {
  Body,
  Get,
  Param,
- Query
+ Query,
+ Req,
+ UseGuards
 }
 from '@nestjs/common';
 
+import type { Request } from 'express';
 
 import {
  ReviewService
@@ -19,6 +22,12 @@ import {
  CreateReviewDto
 }
 from './dto/create-review.dto';
+
+
+import {
+ JwtAuthGuard
+}
+from '../auth/jwt-auth.guard';
 
 
 
@@ -33,14 +42,22 @@ ReviewService
 
 
 
+// Solo usuarios autenticados pueden calificar. El usuarioId se toma del JWT
+// (req.user.userId) y nunca del body, que solo aporta datos de la calificación.
+@UseGuards(JwtAuthGuard)
 @Post()
 crear(
 @Body()
-data:CreateReviewDto
+data:CreateReviewDto,
+@Req()
+req: Request
 ){
 
 return this.reviewService
-.crearReview(data);
+.crearReview(
+  data,
+  (req.user as { userId: string }).userId
+);
 
 }
 

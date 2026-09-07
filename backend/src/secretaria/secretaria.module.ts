@@ -14,6 +14,7 @@ import { Configuracion } from './entities/configuracion.entity';
 import { FlotaModule } from '../flota/flota.module';
 import { NotificacionesModule } from '../notificaciones/notificaciones.module';
 import { SalidasModule } from '../salidas/salidas.module';
+import { AuditoriaModule } from '../auditoria/auditoria.module';
 
 @Module({
   imports: [
@@ -29,8 +30,10 @@ import { SalidasModule } from '../salidas/salidas.module';
     FlotaModule,
     NotificacionesModule,
     SalidasModule,
+    AuditoriaModule,
   ],
   controllers: [SecretariaController],
   providers: [SecretariaService],
+  exports: [SecretariaService],
 })
 export class SecretariaModule {}

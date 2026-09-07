@@ -12,7 +12,10 @@ import type {
   SolicitudRetiro,
   RespuestaSolicitarRetiro,
   CambiarUbicacionRespuesta,
+  DatosVentaManualChofer,
+  VentaManualSolicitud,
 } from "./chofer.types";
+import type { Pasaje } from "../../types/pasaje";
 
 
 export async function obtenerInicio(): Promise<ChoferInicio> {
@@ -139,5 +142,25 @@ export async function actualizarPerfil(datos: {
   telefono?: string;
 }): Promise<PerfilChofer> {
   const res = await api.patch("/chofer/perfil", datos);
+  return res.data;
+}
+
+
+export async function obtenerDatosVentaManual(): Promise<DatosVentaManualChofer> {
+  const res = await api.get("/chofer/venta-manual");
+  return res.data;
+}
+
+export async function realizarVentaManual(
+  datos: VentaManualSolicitud
+): Promise<Pasaje> {
+  const res = await api.post("/chofer/venta-manual", datos);
+  return res.data;
+}
+
+export async function obtenerReciboPdf(pasajeId: string): Promise<Blob> {
+  const res = await api.get(`/chofer/venta-manual/${pasajeId}/pdf`, {
+    responseType: "blob",
+  });
   return res.data;
 }

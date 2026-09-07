@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 
 import Login from "../features/auth/Login";
 import Register from "../features/auth/Register";
@@ -11,8 +11,8 @@ import Dashboard from "../features/secretaria/Dashboard";
 import GestionFila from "../features/secretaria/GestionFila";
 import ChoferesActivos from "../features/secretaria/ChoferesActivos";
 import Boleteria from "../features/secretaria/Boleteria";
-import CajaCentral from "../features/secretaria/CajaCentral";
-import HistorialVentas from "../features/secretaria/HistorialVentas";
+import VentasCaja from "../features/secretaria/VentasCaja";
+import MovimientosSecretaria from "../features/secretaria/MovimientosSecretaria";
 import NominaChoferes from "../features/secretaria/NominaChoferes";
 import Usuarios from "../features/secretaria/Usuarios";
 import ReviewsChoferes from "../features/secretaria/ReviewsChoferes";
@@ -45,6 +45,7 @@ import HistorialViajesChofer from "../features/chofer/HistorialViajesChofer";
 import MisEstadisticas from "../features/chofer/MisEstadisticas";
 import NotificacionesChofer from "../features/chofer/NotificacionesChofer";
 import PerfilChofer from "../features/chofer/PerfilChofer";
+import VentaManualChofer from "../features/chofer/VentaManualChofer";
 
 import ProtectedRoute from "./ProtectedRoute";
 import RoleRoute from "./RoleRoute";
@@ -73,8 +74,10 @@ export default function AppRouter() {
           <Route path="fila" element={<GestionFila />} />
           <Route path="choferes-activos" element={<ChoferesActivos />} />
           <Route path="boleteria" element={<Boleteria />} />
-          <Route path="caja" element={<CajaCentral />} />
-          <Route path="historial" element={<HistorialVentas />} />
+          <Route path="ventas-caja" element={<VentasCaja />} />
+          <Route path="caja" element={<Navigate to="/secretaria/ventas-caja" replace />} />
+          <Route path="historial" element={<Navigate to="/secretaria/ventas-caja" replace />} />
+          <Route path="movimientos" element={<MovimientosSecretaria />} />
           <Route path="choferes" element={<NominaChoferes />} />
           <Route path="usuarios" element={<Usuarios />} />
           <Route path="calificaciones" element={<ReviewsChoferes />} />
@@ -125,6 +128,7 @@ export default function AppRouter() {
           <Route index element={<Inicio />} />
           <Route path="vehiculo" element={<MiVehiculo />} />
           <Route path="fila" element={<MiFila />} />
+          <Route path="venta-manual" element={<VentaManualChofer />} />
           <Route path="escanear-qr" element={<EscanearQR />} />
           <Route path="estado-viaje" element={<EstadoViaje />} />
           <Route path="historial" element={<HistorialViajesChofer />} />

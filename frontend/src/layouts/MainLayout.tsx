@@ -3,7 +3,7 @@ import { useAuth } from "../hooks/useAuth";
 import { useTheme } from "../hooks/useTheme";
 import {
   Bus, LayoutDashboard, MapPin, Ticket, DollarSign,
-  ClipboardList, Users, Star, BarChart3, FileText, Settings,
+  ScrollText, Users, Star, BarChart3, FileText, Settings,
   User, LogOut, ChevronDown, ChevronRight, Sun, Moon, Maximize, Minimize,
   Undo2, Activity
 } from "lucide-react";
@@ -17,8 +17,8 @@ const menuItems = [
   { to: "/secretaria/fila", label: "Filas y Paradas", icon: MapPin },
   { to: "/secretaria/choferes-activos", label: "Choferes activos", icon: Activity },
   { to: "/secretaria/boleteria", label: "Boleteria", icon: Ticket },
-  { to: "/secretaria/caja", label: "Caja Central", icon: DollarSign },
-  { to: "/secretaria/historial", label: "Historial Ventas", icon: ClipboardList },
+  { to: "/secretaria/ventas-caja", label: "Ventas y Caja", icon: DollarSign },
+  { to: "/secretaria/movimientos", label: "Movimientos Secretaria", icon: ScrollText },
   { to: "/secretaria/choferes", label: "Nomina Choferes", icon: Users },
   { to: "/secretaria/usuarios", label: "Usuarios", icon: User },
   { to: "/secretaria/calificaciones", label: "Calificaciones", icon: Star },

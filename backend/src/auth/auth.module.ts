@@ -10,6 +10,7 @@ import { AuthService } from './auth.service';
 import { Usuario } from './usuario.entity';
 
 import { FlotaModule } from '../flota/flota.module';
+import { AuditoriaModule } from '../auditoria/auditoria.module';
 
 import { JwtStrategy } from './jwt.strategy';
 import { JwtAuthGuard } from './jwt-auth.guard';
@@ -20,6 +21,7 @@ import { RolesGuard } from './roles.guard';
     ConfigModule,
 
     FlotaModule,
+    AuditoriaModule,
 
     TypeOrmModule.forFeature([
       Usuario,

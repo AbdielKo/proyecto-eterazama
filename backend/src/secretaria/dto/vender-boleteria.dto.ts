@@ -5,6 +5,7 @@ import {
 import {
   IsArray,
   IsIn,
+  IsInt,
   IsNotEmpty,
   IsNumber,
   IsOptional,
@@ -14,7 +15,7 @@ import {
 } from 'class-validator';
 
 export class AsientoPasajeroDto {
-  @IsNumber()
+  @IsInt()
   @Min(1)
   asiento: number;
 
@@ -32,12 +33,14 @@ export class AsientoPasajeroDto {
 }
 
 export class VentaBoleteriaDto {
-  @IsNumber()
+  @IsInt()
   @IsNotEmpty()
   vehiculoId: number;
 
   @IsArray()
   @IsNotEmpty()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
   asientos: number[];
 
   @IsArray()

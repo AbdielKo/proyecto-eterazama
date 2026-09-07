@@ -252,6 +252,13 @@ export async function asignarRolChofer(userId: string) {
   return respuesta.data;
 }
 
+export async function desbloquearCuenta(
+  userId: string
+): Promise<{ mensaje: string }> {
+  const respuesta = await api.patch(`/auth/usuarios/${userId}/desbloquear`);
+  return respuesta.data;
+}
+
 // =============================================================
 // SOLICITUDES DE RETIRO DE LA FILA
 // =============================================================
@@ -298,6 +305,61 @@ export async function rechazarRetiro(
   const respuesta = await api.patch(`/secretaria/retiros/${id}/rechazar`, {
     comentario,
   });
+  return respuesta.data;
+}
+
+// =============================================================
+// MOVIMIENTOS DE LA SECRETARÍA (bitácora de auditoría inmutable)
+// Solo lectura: el backend registra cada acción automáticamente con el
+// usuario del JWT; aquí solo se consulta y filtra. No existe forma de
+// crear, modificar o eliminar movimientos desde la API.
+// =============================================================
+
+export interface MovimientoSecretaria {
+  id: string;
+  fechaHora: string;
+  usuarioId: string;
+  usuarioNombre: string;
+  rol: string;
+  accion: string;
+  modulo: string;
+  detalle: string | null;
+  registroId: string | null;
+  datosAnteriores: Record<string, unknown> | null;
+  datosNuevos: Record<string, unknown> | null;
+  ip: string | null;
+  createdAt: string;
+}
+
+export interface FiltrosMovimientos {
+  busqueda?: string;
+  usuario?: string;
+  modulo?: string;
+  accion?: string;
+  desde?: string;
+  hasta?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface MovimientosResponse {
+  movimientos: MovimientoSecretaria[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export async function obtenerMovimientosSecretaria(
+  filtros: FiltrosMovimientos = {}
+): Promise<MovimientosResponse> {
+  const respuesta = await api.get("/secretaria/movimientos", { params: filtros });
+  return respuesta.data;
+}
+
+export async function obtenerMovimientoSecretaria(
+  id: string
+): Promise<MovimientoSecretaria> {
+  const respuesta = await api.get(`/secretaria/movimientos/${id}`);
   return respuesta.data;
 }
 

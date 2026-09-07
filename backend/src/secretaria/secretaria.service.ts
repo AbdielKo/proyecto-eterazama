@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 
 import { InjectRepository } from '@nestjs/typeorm';
@@ -17,11 +18,16 @@ import { Viaje } from '../chofer/entities/viaje.entity';
 import { FlotaGateway } from '../flota/flota.gateway';
 import { Configuracion } from './entities/configuracion.entity';
 import { VentaBoleteriaDto } from './dto/vender-boleteria.dto';
+import { VentaManualChoferDto } from '../chofer/dto/venta-manual-chofer.dto';
 import { ActualizarConfiguracionDto } from './dto/actualizar-configuracion.dto';
 import { normalizarConfiguracionAsientos, obtenerAsientosDistribuidos } from '../flota/asientos-config.util';
 import { NotificacionPasajero } from '../notificaciones/notificacion-pasajero.entity';
 import { NotificacionesService } from '../notificaciones/notificaciones.service';
 import { SalidasService } from '../salidas/salidas.service';
+import {
+  AuditoriaService,
+  ActorAuditoria,
+} from '../auditoria/auditoria.service';
 import {
   reindexarFilaOficial,
   calcularPuestosFila,
@@ -68,6 +74,8 @@ export class SecretariaService {
     private readonly notificacionesService: NotificacionesService,
 
     private readonly salidasService: SalidasService,
+
+    private readonly auditoriaService: AuditoriaService,
   ) {}
 
   // =============================================================
@@ -746,7 +754,10 @@ export class SecretariaService {
     return this.serializarConfiguracion(cfg);
   }
 
-  async actualizarConfiguracion(dto: ActualizarConfiguracionDto) {
+  async actualizarConfiguracion(
+    dto: ActualizarConfiguracionDto,
+    actor: ActorAuditoria,
+  ) {
     const cfg = await this.obtenerConfiguracionFila();
 
     const precioCochabamba = Number(dto.precioCochabamba);
@@ -777,6 +788,20 @@ export class SecretariaService {
       cfg.horarioCierre = dto.horarioCierre;
 
     const guardado = await this.configRepo.save(cfg);
+
+    await this.auditoriaService.registrar(actor, {
+      accion: 'actualizar_configuracion',
+      modulo: 'configuracion',
+      detalle: 'Configuración del sindicato actualizada (precios, contacto y horarios).',
+      registroId: String(guardado.id),
+      datosNuevos: {
+        precioCochabamba: guardado.precioCochabamba,
+        precioEterazama: guardado.precioEterazama,
+        nombreSindicato: guardado.nombreSindicato,
+        telefono: guardado.telefono ?? null,
+      },
+    });
+
     return this.serializarConfiguracion(guardado);
   }
 
@@ -791,6 +816,16 @@ export class SecretariaService {
       );
     }
     return precio;
+  }
+
+  // Precios oficiales vigentes para la pantalla de venta manual del chofer.
+  // Mismos valores que usa el núcleo de venta (no hay precio "de frontend").
+  async obtenerPreciosVenta() {
+    const cfg = await this.obtenerConfiguracionFila();
+    return {
+      cochabamba: Number(cfg.precioCochabamba || 0),
+      eterazama: Number(cfg.precioEterazama || 0),
+    };
   }
 
   // =============================================================
@@ -830,6 +865,7 @@ export class SecretariaService {
     pasajeId: string,
     motivo: string,
     secretaria: string,
+    actor: ActorAuditoria,
   ) {
     const { guardado: resultado, notificacion } = await this.dataSource.transaction(
       async (manager) => {
@@ -916,6 +952,22 @@ export class SecretariaService {
         return { guardado, notificacion };
       },
     );
+
+    await this.auditoriaService.registrar(actor, {
+      accion: 'confirmar_reembolso',
+      modulo: 'reembolsos',
+      detalle: `Reembolso confirmado para el pasaje ${resultado.codigo || pasajeId} por Bs ${resultado.montoReembolsado ?? 0}.`,
+      registroId: pasajeId,
+      datosAnteriores: {
+        estadoReembolso: 'PENDIENTE',
+        estadoBoleto: resultado.estadoBoleto,
+      },
+      datosNuevos: {
+        estadoReembolso: 'REEMBOLSADO',
+        montoReembolsado: resultado.montoReembolsado,
+        secretariaReembolso: resultado.secretariaReembolso,
+      },
+    });
 
     this.flotaGateway.notificarCambioFlota();
 
@@ -1102,18 +1154,52 @@ export class SecretariaService {
     };
   }
 
-  // Venta de boletería en ventanilla (pago en efectivo).
-  // La operación se realiza en transacción con lock pesimista sobre el
-  // vehículo para validar la disponibilidad de asientos de forma segura
-  // incluso si dos secretarias venden el mismo asiento al mismo tiempo.
-  async venderBoleteria(dto: VentaBoleteriaDto) {
+  // Núcleo único de venta de pasajes (boletería/SECRETARIA y venta manual del
+  // CHOFER). La operación se realiza en transacción con lock pesimista sobre
+  // el vehículo para validar la disponibilidad de asientos de forma segura
+  // incluso si dos vendedores (secretaria, chofer o pasajero) venden el mismo
+  // asiento al mismo tiempo. Esta es la ÚNICA lógica de ventas del sistema:
+  // precios desde configuración, asientos ocupados/chofer, fila/puesto 1,
+  // generación de código y auto-programación de salida.
+  private async ejecutarVentaBoleteria(
+    dto: VentaBoleteriaDto,
+    opciones?: {
+      validarPuestoUno?: boolean;
+      actor?: ActorAuditoria;
+      accionAuditoria?: string;
+    },
+  ) {
     const precioUnitario = await this.obtenerPrecioTramo(dto.tramo);
     const montoEncomienda = Number(dto.montoEncomienda || 0);
+    if (!Number.isFinite(montoEncomienda) || montoEncomienda < 0) {
+      throw new BadRequestException(
+        'El monto de la encomienda no puede ser negativo.',
+      );
+    }
+    if (montoEncomienda > 5000) {
+      throw new BadRequestException(
+        'El monto de la encomienda excede el límite permitido (Bs 5000).',
+      );
+    }
+
+    for (const asiento of dto.asientos) {
+      if (!Number.isInteger(asiento) || !Number.isFinite(asiento)) {
+        throw new BadRequestException(
+          `El valor de asiento "${asiento}" no es válido. Debe ser un número entero positivo.`,
+        );
+      }
+    }
 
     const asientos = Array.from(new Set(dto.asientos)).sort((a, b) => a - b);
 
     if (asientos.length === 0) {
       throw new BadRequestException('Debe seleccionar al menos un asiento.');
+    }
+
+    if (asientos.length > 50) {
+      throw new BadRequestException(
+        'No se pueden vender más de 50 asientos en una sola operación.',
+      );
     }
 
     if (asientos.length !== dto.asientos.length) {
@@ -1162,6 +1248,35 @@ export class SecretariaService {
         );
       }
 
+      // Estado operativo: un vehículo inactivo, en mantenimiento o en ruta no
+      // puede recibir nuevas ventas sin importar lo que envíe el navegador.
+      if (vehiculo.estadoVehiculo === 'inactivo') {
+        throw new BadRequestException(
+          `El vehículo ${vehiculo.placa} está INACTIVO y no puede recibir nuevas ventas.`,
+        );
+      }
+      if (vehiculo.estadoViaje === 'mantenimiento') {
+        throw new BadRequestException(
+          `El vehículo ${vehiculo.placa} está en MANTENIMIENTO y no puede recibir nuevas ventas.`,
+        );
+      }
+      if (vehiculo.estadoViaje === 'en_ruta') {
+        throw new BadRequestException(
+          `El vehículo ${vehiculo.placa} está EN RUTA y no puede recibir nuevas ventas.`,
+        );
+      }
+
+      // Coherencia tramo vs ubicación real del vehículo (regla de negocio del
+      // sindicato): un vehículo ubicado en COCHABAMBA solo vende
+      // cochabamba→eterazama y uno en ETERAZAMA solo eterazama→cochabamba.
+      // El tramo procedente del cliente se descarta si no coincide con la
+      // parada/fila real determinada por el backend.
+      if (vehiculo.paradaActual !== dto.tramo) {
+        throw new BadRequestException(
+          `El vehículo ${vehiculo.placa} está ubicado en ${vehiculo.paradaActual === 'cochabamba' ? 'Cochabamba' : 'Eterazama'}, por lo que solo puede vender pasajes desde esa parada. El tramo enviado no coincide con la ubicación real del vehículo.`,
+        );
+      }
+
       // Regla de negocio: solo el chofer que ocupa el PUESTO 1 en su parada
       // puede recibir nuevas ventas de pasajes.
       if (vehiculo.paradaActual !== 'cochabamba' && vehiculo.paradaActual !== 'eterazama') {
@@ -1173,6 +1288,41 @@ export class SecretariaService {
         throw new BadRequestException(
           `Solo el chofer que ocupa el PUESTO 1 puede cargar pasajeros y recibir nuevas ventas. Este vehículo (${vehiculo.placa}) ocupa el puesto ${vehiculo.puestoFila}.`,
         );
+      }
+
+      // Revalidación estricta (SOLO para la venta manual del CHOFER): bajo el
+      // lock pesimista del vehículo se RELEE la fila completa de la parada y se
+      // recalcula la posición real con la MISMA fuente oficial (calcularPuestosFila).
+      // Si el chofer perdió el puesto #1 (o su parada/fila cambió) mientras la
+      // pantalla estaba abierta, la venta se rechaza aquí dentro de la transacción.
+      if (opciones?.validarPuestoUno) {
+        const filaVehiculos = await manager.find(Vehiculo, {
+          where: { paradaActual: vehiculo.paradaActual },
+          order: { puestoFila: 'ASC', id: 'ASC' },
+        });
+        const choferesFila = await manager.find(Usuario, {
+          where: { rol: ROLES.CHOFER, estado: 'activo' },
+          select: { placaAsignada: true },
+        });
+        const placasOficialesFila = new Set(
+          choferesFila
+            .map((c) => c.placaAsignada)
+            .filter((p): p is string => !!p),
+        );
+        const puestoBajoLock =
+          calcularPuestosFila(
+            filaVehiculos,
+            vehiculo.paradaActual,
+            placasOficialesFila,
+          ).get(vehiculo.placa) ?? 0;
+
+        if (puestoBajoLock !== 1) {
+          throw new BadRequestException(
+            puestoBajoLock > 1
+              ? `No puedes vender boletos porque actualmente ocupas el puesto #${puestoBajoLock} de la fila. Solo el primero de la fila puede vender.`
+              : 'No puedes vender boletos porque no estás anotado en ninguna fila.',
+          );
+        }
       }
 
       // Un vehículo POR SALIR ya no recibe ventas: le queda solo partir.
@@ -1261,7 +1411,218 @@ export class SecretariaService {
         { manual: false },
       );
 
+      // Auditoría DENTRO de la MISMA transacción: si la venta hace rollback,
+      // el movimiento de auditoría también se revierte. Nunca queda una venta
+      // confirmada sin su bitácora, y nunca se confía en datos del frontend
+      // para la identidad (proviene del JWT vía opciones.actor).
+      if (opciones?.actor) {
+        const accionAuditoria =
+          opciones.accionAuditoria || 'vender_boleteria';
+        await this.auditoriaService.registrarEnTransaccion(
+          manager,
+          opciones.actor as ActorAuditoria,
+          {
+            accion: accionAuditoria,
+            modulo: 'boleteria',
+            detalle: `Venta de ${asientos.length} boleto(s) por Bs ${guardado.montoTotal} en el vehículo ${guardado.placaVehiculo || ''} (tramo ${guardado.tramo || ''}).`,
+            registroId: guardado.id,
+            datosNuevos: {
+              codigo: guardado.codigo,
+              placaVehiculo: guardado.placaVehiculo,
+              asientos: guardado.asientos,
+              montoTotal: guardado.montoTotal,
+              montoEncomienda: guardado.montoEncomienda ?? 0,
+              metodoPago: guardado.metodoPago,
+              tramo: guardado.tramo,
+            },
+          },
+        );
+      }
+
       return { guardado, salida };
+    });
+
+    return resultadoVenta;
+  }
+
+  // Venta de boletería en ventanilla (pago en efectivo), hecha por una
+  // SECRETARIA. Reutiliza el núcleo `ejecutarVentaBoleteria`. La auditoría se
+  // registra DENTRO de la MISMA transacción (acción vender_boleteria), de modo
+  // que una venta confirmada siempre tiene su movimiento en movimientos_secretaria.
+  async venderBoleteria(dto: VentaBoleteriaDto, actor: ActorAuditoria) {
+    const resultadoVenta = await this.ejecutarVentaBoleteria(dto, {
+      actor,
+      accionAuditoria: 'vender_boleteria',
+    });
+
+    this.flotaGateway.notificarCambioFlota();
+
+    if (resultadoVenta.salida.aplicada) {
+      this.salidasService.emitirNotificaciones(resultadoVenta.salida);
+    }
+
+    return resultadoVenta.guardado;
+  }
+
+  // Venta manual realizada por un CHOFER desde su propio panel, sin QR y solo
+  // en efectivo. Reutiliza EXACTAMENTE el mismo núcleo de venta que la boletería
+  // (mismos precios, validaciones de fila/puesto 1, asientos ocupados/chofer y
+  // disponibilidad). El backend determina TODO desde el JWT y la base de datos:
+  //   - vehículo: SIEMPRE el asignado al chofer (jamás del body)
+  //   - fila y puesto: con la MISMA fuente oficial (calcularPuestosFila)
+  //   - sentido/tramo: derivado de la parada/fila actual (las dos únicas
+  //     paradas son filas: cochabamba -> Cbba→Eterazama; eterazama -> Eter→Cbba)
+  //   - método de pago: SIEMPRE EFECTIVO
+  // El chofer NO puede elegir parada, sentido, fila, vehículo ni precio.
+  async ventaManualChofer(
+    dto: VentaManualChoferDto,
+    actor: ActorAuditoria,
+    choferId: string,
+  ) {
+    if (actor.usuarioId !== choferId) {
+      throw new BadRequestException(
+        'No autorizado: la venta debe ser registrada con la identidad del chofer.',
+      );
+    }
+
+    const usuario = await this.usuarioRepo.findOne({
+      where: { id: choferId },
+    });
+    if (!usuario) {
+      throw new NotFoundException('Chofer no encontrado.');
+    }
+    if (usuario.rol !== ROLES.CHOFER) {
+      throw new ForbiddenException('Solo un CHOFER puede usar esta venta.');
+    }
+    if (usuario.estado !== 'activo') {
+      throw new BadRequestException(
+        'No puedes vender boletos porque tu estado de servicio está INACTIVO.',
+      );
+    }
+    if (!usuario.placaAsignada) {
+      throw new BadRequestException(
+        'El chofer no tiene un vehículo asignado; no puede realizar ventas.',
+      );
+    }
+
+    const vehiculo = await this.vehiculoRepo.findOne({
+      where: { placa: usuario.placaAsignada },
+    });
+    if (!vehiculo) {
+      throw new BadRequestException(
+        'El vehículo asignado al chofer no está registrado.',
+      );
+    }
+
+    if (
+      vehiculo.estadoVehiculo === 'inactivo' ||
+      vehiculo.estadoViaje === 'mantenimiento'
+    ) {
+      throw new BadRequestException(
+        `El vehículo ${vehiculo.placa} está fuera de servicio (${vehiculo.estadoVehiculo === 'inactivo' ? 'inactivo' : 'mantenimiento'}); no puede vender pasajes.`,
+      );
+    }
+
+    // ============================================================
+    // REGLAS ESTRICTAS DE FILA (fuente oficial compartida del proyecto)
+    // ============================================================
+    // 1) El chofer debe estar ANOTADO en una fila: paradaActual debe ser una de
+    //    las dos paradas con fila, y puestoFila > 0.
+    // 2) El puesto REAL se calcula con calcularPuestosFila (la MISMA función que
+    //    usa obtenerMiFila / reindexarFilaOficial), no confiando en un valor
+    //    histórico. Solo el PUESTO #1 puede vender.
+    // 3) El sentido de la venta ES la parada actual (sin posibilidad de elegir
+    //    otro sentido ni otra fila).
+    const parada = vehiculo.paradaActual;
+    if (parada !== 'cochabamba' && parada !== 'eterazama') {
+      throw new BadRequestException(
+        'No puedes vender boletos porque no estás anotado en ninguna fila.',
+      );
+    }
+
+    if (!(vehiculo.puestoFila > 0)) {
+      throw new BadRequestException(
+        'No puedes vender boletos porque no estás anotado en ninguna fila.',
+      );
+    }
+
+    // Cálculo REAL de la posición con la fuente oficial compartida.
+    const todosVehiculos = await this.vehiculoRepo.find({
+      order: { puestoFila: 'ASC' },
+    });
+    const choferesOficiales = await this.usuarioRepo.find({
+      where: { rol: ROLES.CHOFER, estado: 'activo' },
+      select: { placaAsignada: true },
+    });
+    const placasOficiales = new Set(
+      choferesOficiales
+        .map((c) => c.placaAsignada)
+        .filter((p): p is string => !!p),
+    );
+    const puestoReal =
+      calcularPuestosFila(todosVehiculos, parada, placasOficiales).get(
+        vehiculo.placa,
+      ) ?? 0;
+
+    if (puestoReal !== 1) {
+      throw new BadRequestException(
+        `No puedes vender boletos porque actualmente ocupas el puesto #${puestoReal} de la fila. Solo el primero de la fila puede vender.`,
+      );
+    }
+
+    const tramo = parada; // cochabamba -> Cbba→Eterazama; eterazama -> Eter→Cbba
+
+    // Celular del pasajero: único dato del recibo que aporta el chofer. Se
+    // guarda SIEMPRE en formato internacional +591XXXXXXXX (ej: 71234567 ->
+    // +59171234567) porque es el mismo número que recibe el recibo por
+    // WhatsApp. No se guardan dos formatos distintos.
+    const celularInternacional = `+591${dto.celular}`;
+
+    // El backend construye el payload completo bajo su control: el motor de
+    // venta únicamente acepta EFECTIVO, recibe el vehiculoId del vehículo
+    // asignado en el JWT y el tramo/sentido derivado de la fila actual.
+    // Cualquier dato extra del body es rechazado por el ValidationPipe
+    // (whitelist + forbidNonWhitelisted).
+    const dtoVenta: VentaBoleteriaDto = {
+      vehiculoId: vehiculo.id,
+      asientos: dto.asientos,
+      pasajeros: dto.pasajeros,
+      tramo,
+      contactoRecibo: dto.pasajeros[0] ? dto.pasajeros[0].nombre : 'Pasajero',
+      ciRecibo: undefined,
+      telefonoRecibo: celularInternacional,
+      montoEncomienda: dto.montoEncomienda ?? undefined,
+      metodoPago: 'EFECTIVO',
+    };
+
+    // Validación adicional dentro de la MISMA transacción del núcleo (lock
+    // pesimista sobre el vehículo): la posición de la fila se RELEE bajo lock,
+    // de modo que si entre el cálculo previo y la venta el chofer pierde el
+    // puesto #1 la venta se rechaza igual.
+    const resultadoVenta = await this.ejecutarVentaBoleteria(dtoVenta, {
+      validarPuestoUno: true,
+    });
+
+    await this.auditoriaService.registrar(actor, {
+      accion: 'venta_manual_chofer',
+      modulo: 'ventas',
+      detalle: `Venta manual del chofer ${actor.usuarioNombre || ''} (placa ${vehiculo.placa}) de ${dto.asientos.length} boleto(s) por Bs ${resultadoVenta.guardado.montoTotal} en tramo ${resultadoVenta.guardado.tramo || ''} (fila/puesto ${tramo}/#1). Recibo enviado al celular ${celularInternacional}.`,
+      registroId: resultadoVenta.guardado.id,
+      datosNuevos: {
+        pasajeId: resultadoVenta.guardado.id,
+        codigo: resultadoVenta.guardado.codigo,
+        placaVehiculo: resultadoVenta.guardado.placaVehiculo,
+        fila: parada,
+        sentido: `${resultadoVenta.guardado.origen} → ${resultadoVenta.guardado.destino}`,
+        asientos: resultadoVenta.guardado.asientos,
+        montoTotal: resultadoVenta.guardado.montoTotal,
+        montoEncomienda: resultadoVenta.guardado.montoEncomienda ?? 0,
+        metodoPago: 'EFECTIVO',
+        celular: celularInternacional,
+        tramo: resultadoVenta.guardado.tramo,
+        origen: resultadoVenta.guardado.origen,
+        destino: resultadoVenta.guardado.destino,
+      },
     });
 
     this.flotaGateway.notificarCambioFlota();
@@ -1295,7 +1656,12 @@ export class SecretariaService {
     });
   }
 
-  async rechazarRetiro(id: string, secretariaNombre: string, comentario?: string) {
+  async rechazarRetiro(
+    id: string,
+    secretariaNombre: string,
+    comentario?: string,
+    actor?: ActorAuditoria,
+  ) {
     const solicitud = await this.solicitudRetiroRepo.findOne({
       where: { id },
     });
@@ -1312,13 +1678,32 @@ export class SecretariaService {
     await this.solicitudRetiroRepo.save(solicitud);
     this.flotaGateway.notificarCambioFlota();
 
+    if (actor) {
+      await this.auditoriaService.registrar(actor, {
+        accion: 'rechazar_retiro',
+        modulo: 'retiros',
+        detalle: `Solicitud de retiro rechazada de la placa ${solicitud.placa || ''}.`,
+        registroId: id,
+        datosNuevos: {
+          estado: 'RECHAZADA',
+          procesadoPor: secretariaNombre,
+          comentarioRespuesta: solicitud.comentarioRespuesta ?? null,
+        },
+      });
+    }
+
     return { solicitud, mensaje: 'Solicitud de retiro rechazada.' };
   }
 
   // Aprobar la solicitud. Si el chofer tiene pasajeros, los transfiere al
   // siguiente vehículo de la fila (o los deja pendientes de transferir si no
   // hay otro chofer disponible), y luego saca al chofer de la fila.
-  async aprobarRetiro(id: string, secretariaNombre: string, comentario?: string) {
+  async aprobarRetiro(
+    id: string,
+    secretariaNombre: string,
+    comentario?: string,
+    actor?: ActorAuditoria,
+  ) {
     const solicitud = await this.solicitudRetiroRepo.findOne({
       where: { id },
     });
@@ -1521,6 +1906,21 @@ export class SecretariaService {
     // WebSocket post-commit (best-effort) para cada pasajero transferido.
     for (const n of notificaciones) {
       this.notificacionesService.notificarWS(n.usuarioId, n);
+    }
+
+    if (actor) {
+      await this.auditoriaService.registrar(actor, {
+        accion: 'aprobar_retiro',
+        modulo: 'retiros',
+        detalle: `Solicitud de retiro aprobada para la placa ${resultado.transferidoA ? `(transferidos a ${resultado.transferidoA})` : ''}.`,
+        registroId: id,
+        datosNuevos: {
+          estado: 'ACEPTADA',
+          procesadoPor: secretariaNombre,
+          transferidoA: resultado.transferidoA,
+          pendientesTransferir: resultado.pendientesTransferir,
+        },
+      });
     }
 
     return {

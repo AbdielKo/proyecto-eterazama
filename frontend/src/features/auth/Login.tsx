@@ -1,8 +1,14 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { loginRequest } from "../../api/auth.api";
 import { useAuth } from "../../hooks/useAuth";
 import { useNavigate, Link } from "react-router-dom";
-import { Bus, Eye, EyeOff } from "lucide-react";
+import { Bus, Eye, EyeOff, Lock, ShieldAlert } from "lucide-react";
+
+function extraerMinutosBloqueo(mensaje: string): number | null {
+  const match = mensaje.match(/(\d+)\s*minuto/i);
+  if (!match) return null;
+  return Number(match[1]);
+}
 
 export default function Login() {
   const { login } = useAuth();
@@ -12,7 +18,29 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState("");
+  const [bloqueoHasta, setBloqueoHasta] = useState<Date | null>(null);
+  const [ahora, setAhora] = useState(() => new Date());
   const [showPassword, setShowPassword] = useState(false);
+
+  useEffect(() => {
+    if (!bloqueoHasta) return;
+    const id = setInterval(() => setAhora(new Date()), 1000);
+    return () => clearInterval(id);
+  }, [bloqueoHasta]);
+
+  useEffect(() => {
+    if (bloqueoHasta && new Date() >= bloqueoHasta) {
+      setBloqueoHasta(null);
+      setError("");
+    }
+  }, [ahora, bloqueoHasta]);
+
+  const segundosRestantes = bloqueoHasta
+    ? Math.max(0, Math.floor((bloqueoHasta.getTime() - new Date().getTime()) / 1000))
+    : 0;
+  const mm = Math.floor(segundosRestantes / 60);
+  const ss = segundosRestantes % 60;
+  const tiempoRestante = `${mm}:${String(ss).padStart(2, "0")}`;
 
   async function ingresar(e: React.FormEvent) {
     e.preventDefault();
@@ -32,12 +60,23 @@ export default function Login() {
       if (rol === "secretaria") navigate("/secretaria");
       else if (rol === "chofer") navigate("/chofer");
       else navigate("/pasajero");
-    } catch {
-      setError("Usuario o contraseña incorrectos");
+    } catch (e: any) {
+      const mensaje = e?.response?.data?.message;
+      const texto = mensaje || "Usuario o contraseña incorrectos";
+
+      if (texto.toLowerCase().includes("bloqueado temporalmente")) {
+        const minutos = extraerMinutosBloqueo(texto);
+        if (minutos) {
+          setBloqueoHasta(new Date(Date.now() + minutos * 60 * 1000));
+        }
+      }
+      setError(texto);
     } finally {
       setCargando(false);
     }
   }
+
+  const enBloqueo = bloqueoHasta !== null && segundosRestantes > 0;
 
   return (
     <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
@@ -52,8 +91,20 @@ export default function Login() {
 
         <form onSubmit={ingresar} className="bg-gray-900 border border-gray-800 rounded-2xl p-8 space-y-5">
           {error && (
-            <div className="bg-red-500/10 border border-red-500/30 text-red-400 px-4 py-3 rounded-xl text-sm">
-              {error}
+            <div className="flex items-start gap-3 bg-red-500/10 border border-red-500/30 text-red-400 px-4 py-3 rounded-xl text-sm">
+              {enBloqueo || error.toLowerCase().includes("bloqueada") ? (
+                <Lock className="w-4 h-4 shrink-0 mt-0.5" />
+              ) : (
+                <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+              )}
+              <div>
+                {error}
+                {enBloqueo && (
+                  <p className="mt-1 font-mono text-base font-semibold text-red-300">
+                    Reintento disponible en {tiempoRestante}
+                  </p>
+                )}
+              </div>
             </div>
           )}
 
@@ -90,7 +141,7 @@ export default function Login() {
 
           <button
             type="submit"
-            disabled={cargando}
+            disabled={cargando || enBloqueo}
             className="w-full bg-sky-600 hover:bg-sky-700 disabled:bg-sky-800 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-xl transition-colors cursor-pointer"
           >
             {cargando ? (
@@ -101,6 +152,8 @@ export default function Login() {
                 </svg>
                 Ingresando...
               </span>
+            ) : enBloqueo ? (
+              `Espera ${tiempoRestante}`
             ) : (
               "Ingresar"
             )}

@@ -28,6 +28,11 @@ import {
 } from '../flota/vehiculo.entity';
 
 
+import {
+  Pasaje
+} from '../pasajes/pasaje.entity';
+
+
 
 @Module({
 
@@ -37,7 +42,9 @@ import {
 
       Review,
 
-      Vehiculo
+      Vehiculo,
+
+      Pasaje
 
     ])
 

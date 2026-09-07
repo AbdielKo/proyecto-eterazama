@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  HttpException,
   Injectable,
   NotFoundException,
   UnauthorizedException,
@@ -11,8 +12,6 @@ import { Repository, DataSource, EntityManager } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 
 import * as bcrypt from 'bcrypt';
-
-import { OAuth2Client } from 'google-auth-library';
 
 import { Usuario } from './usuario.entity';
 
@@ -28,7 +27,7 @@ import { RegistroDto } from './dto/registro.dto';
 import { LoginDto } from './dto/login.dto';
 import { CrearChoferDto } from './dto/crear-chofer.dto';
 
-const googleClient = new OAuth2Client();
+import { AuditoriaService } from '../auditoria/auditoria.service';
 
 @Injectable()
 export class AuthService {
@@ -41,6 +40,8 @@ export class AuthService {
     private readonly jwtService: JwtService,
 
     private readonly dataSource: DataSource,
+
+    private readonly auditoriaService: AuditoriaService,
   ) {}
 
   // ============================================================
@@ -251,7 +252,7 @@ export class AuthService {
   // LOGIN NORMAL
   // ============================================================
 
-  async login(data: LoginDto) {
+  async login(data: LoginDto, ip?: string) {
     const usuario = await this.usuarioRepo.findOne({
       where: {
         nombreUsuario:
@@ -269,6 +270,10 @@ export class AuthService {
         rol: true,
         placaAsignada: true,
         fechaRegistro: true,
+        intentosFallidos: true,
+        nivelBloqueo: true,
+        bloqueoTemporalHasta: true,
+        cuentaBloqueada: true,
       },
     });
 
@@ -278,9 +283,40 @@ export class AuthService {
       );
     }
 
+    // ------------------------------------------------------------
+    // 1. Verificar si la cuenta está bloqueada permanentemente
+    // ------------------------------------------------------------
+
+    if (usuario.cuentaBloqueada) {
+      throw new UnauthorizedException(
+        'Tu cuenta está bloqueada. Debes solicitar a Secretaría el desbloqueo de tu cuenta.',
+      );
+    }
+
+    // ------------------------------------------------------------
+    // 2. Verificar bloqueo temporal
+    // ------------------------------------------------------------
+
+    if (
+      usuario.bloqueoTemporalHasta &&
+      new Date(usuario.bloqueoTemporalHasta).getTime() > Date.now()
+    ) {
+      const minutosRestantes = Math.ceil(
+        (new Date(usuario.bloqueoTemporalHasta).getTime() - Date.now()) / 60000,
+      );
+      throw new HttpException(
+        `Demasiados intentos. Tu acceso ha sido bloqueado temporalmente. Intenta nuevamente en ${minutosRestantes} minuto(s).`,
+        401,
+      );
+    }
+
+    // ------------------------------------------------------------
+    // 3. Validar contraseña
+    // ------------------------------------------------------------
+
     if (!usuario.passwordHash) {
       throw new UnauthorizedException(
-        'Esta cuenta no tiene contraseña local. Inicie sesión con Google.',
+        'Usuario o contraseña incorrectos.',
       );
     }
 
@@ -290,125 +326,97 @@ export class AuthService {
     );
 
     if (!contraseñaCorrecta) {
-      throw new UnauthorizedException(
-        'Usuario o contraseña incorrectos.',
-      );
+      // Incrementar intentos fallidos
+      usuario.intentosFallidos += 1;
+
+      let mensaje: string;
+      let evento: string;
+
+      if (usuario.intentosFallidos === 3) {
+        mensaje = 'Has ingresado una contraseña incorrecta 3 veces. Este es un aviso de seguridad. Los siguientes intentos incorrectos producirán bloqueos temporales.';
+        evento = 'login_fallido';
+      } else if (usuario.intentosFallidos === 4) {
+        usuario.bloqueoTemporalHasta = new Date(Date.now() + 60 * 1000);
+        usuario.nivelBloqueo = 1;
+        mensaje = 'Demasiados intentos. Tu acceso ha sido bloqueado durante 1 minuto.';
+        evento = 'bloqueo_temporal';
+      } else if (usuario.intentosFallidos === 5) {
+        usuario.bloqueoTemporalHasta = new Date(Date.now() + 3 * 60 * 1000);
+        usuario.nivelBloqueo = 2;
+        mensaje = 'Demasiados intentos. Tu acceso ha sido bloqueado durante 3 minutos.';
+        evento = 'bloqueo_temporal';
+      } else if (usuario.intentosFallidos === 6) {
+        usuario.bloqueoTemporalHasta = new Date(Date.now() + 5 * 60 * 1000);
+        usuario.nivelBloqueo = 3;
+        mensaje = 'Demasiados intentos. Tu acceso ha sido bloqueado durante 5 minutos.';
+        evento = 'bloqueo_temporal';
+      } else if (usuario.intentosFallidos >= 7) {
+        usuario.cuentaBloqueada = true;
+        usuario.nivelBloqueo = 4;
+        mensaje = 'Tu cuenta está bloqueada. Debes solicitar a Secretaría el desbloqueo de tu cuenta.';
+        evento = 'cuenta_bloqueada';
+      } else {
+        mensaje = 'Usuario o contraseña incorrectos.';
+        evento = 'login_fallido';
+      }
+
+      await this.usuarioRepo.save(usuario);
+
+      const actor = {
+        usuarioId: usuario.id,
+        usuarioNombre: usuario.nombreUsuario,
+        rol: usuario.rol,
+        ip: ip || null,
+      };
+
+      await this.auditoriaService.registrar(actor, {
+        accion: evento,
+        modulo: 'seguridad',
+        detalle: `Intento de login fallido para ${usuario.nombreUsuario}. Intentos: ${usuario.intentosFallidos}.`,
+        registroId: usuario.id,
+        datosNuevos: { intentosFallidos: usuario.intentosFallidos },
+      });
+
+      throw new UnauthorizedException(mensaje);
     }
 
-    if (!esRolValido(usuario.rol)) {
-      throw new UnauthorizedException(
-        'La cuenta tiene un rol inválido.',
-      );
-    }
+    // ------------------------------------------------------------
+    // 4. Contraseña correcta: resetear contadores
+    // ------------------------------------------------------------
+
+    usuario.intentosFallidos = 0;
+    usuario.nivelBloqueo = 0;
+    usuario.bloqueoTemporalHasta = null;
+    usuario.cuentaBloqueada = false;
+
+    await this.usuarioRepo.save(usuario);
 
     return this.generarSesion(usuario);
   }
 
   // ============================================================
-  // LOGIN CON GOOGLE
+  // DESBLOQUEAR CUENTA (SÓLO SECRETARÍA)
   // ============================================================
 
-  async loginGoogle(
-    googleToken: string,
-  ) {
-    try {
-      const ticket =
-        await googleClient.verifyIdToken({
-          idToken: googleToken,
-        });
+  async desbloquearCuenta(id: string): Promise<Usuario> {
+    const usuario = await this.usuarioRepo.findOne({
+      where: { id },
+    });
 
-      const payload =
-        ticket.getPayload();
-
-      if (
-        !payload ||
-        !payload.email
-      ) {
-        throw new UnauthorizedException(
-          'Token de Google inválido.',
-        );
-      }
-
-      const email =
-        payload.email
-          .trim()
-          .toLowerCase();
-
-      // IMPORTANTE:
-      // Aquí usuario sí es Usuario | null.
-      let usuario: Usuario | null =
-        await this.usuarioRepo.findOne({
-          where: {
-            gmail: email,
-          },
-        });
-
-      // ----------------------------------------------------------
-      // SI NO EXISTE, CREAR AUTOMÁTICAMENTE COMO USUARIO
-      // ----------------------------------------------------------
-
-      if (!usuario) {
-        const baseUsuario =
-          this.normalizarNombreUsuario(
-            email.split('@')[0],
-          );
-
-        let nombreUsuario =
-          baseUsuario;
-
-        let contador = 1;
-
-        // Evitar nombres de usuario duplicados
-        while (
-          await this.usuarioRepo.findOne({
-            where: {
-              nombreUsuario,
-            },
-          })
-        ) {
-          nombreUsuario =
-            `${baseUsuario}${contador}`;
-
-          contador++;
-        }
-
-        // AHORA crearUsuarioInterno devuelve Usuario,
-        // no un objeto parcial.
-        usuario =
-          await this.crearUsuarioInterno({
-            nombreUsuario,
-
-            nombre:
-              payload.given_name ||
-              undefined,
-
-            apellidos:
-              payload.family_name ||
-              undefined,
-
-            gmail: email,
-
-            rol:
-              ROLES.USUARIO,
-          });
-      }
-
-      // TypeScript ya sabe que aquí usuario NO es null.
-      return this.generarSesion(
-        usuario,
-      );
-    } catch (error) {
-      if (
-        error instanceof
-        UnauthorizedException
-      ) {
-        throw error;
-      }
-
-      throw new UnauthorizedException(
-        'Error al autenticar con Google.',
-      );
+    if (!usuario) {
+      throw new NotFoundException('Usuario no encontrado.');
     }
+
+    if (!usuario.cuentaBloqueada) {
+      throw new BadRequestException('La cuenta no está bloqueada.');
+    }
+
+    usuario.intentosFallidos = 0;
+    usuario.nivelBloqueo = 0;
+    usuario.bloqueoTemporalHasta = null;
+    usuario.cuentaBloqueada = false;
+
+    return await this.usuarioRepo.save(usuario);
   }
 
   // ============================================================
@@ -712,6 +720,10 @@ export class AuthService {
         estado: true,
         placaAsignada: true,
         fechaRegistro: true,
+        intentosFallidos: true,
+        nivelBloqueo: true,
+        bloqueoTemporalHasta: true,
+        cuentaBloqueada: true,
       },
 
       order: {
@@ -742,6 +754,10 @@ export class AuthService {
         estado: true,
         placaAsignada: true,
         fechaRegistro: true,
+        intentosFallidos: true,
+        nivelBloqueo: true,
+        bloqueoTemporalHasta: true,
+        cuentaBloqueada: true,
       },
 
       order: {
@@ -1031,33 +1047,5 @@ export class AuthService {
       fechaRegistro:
         usuario.fechaRegistro,
     };
-  }
-
-  // ============================================================
-  // NORMALIZAR NOMBRE PARA CUENTA GOOGLE
-  // ============================================================
-
-  private normalizarNombreUsuario(
-    valor: string,
-  ): string {
-    const limpio =
-      valor
-        .toLowerCase()
-        .replace(
-          /[^a-z0-9._-]/g,
-          '',
-        )
-        .substring(
-          0,
-          40,
-        );
-
-    if (
-      limpio.length >= 3
-    ) {
-      return limpio;
-    }
-
-    return `usuario${Date.now()}`;
   }
 }

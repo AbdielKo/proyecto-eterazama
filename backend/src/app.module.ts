@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
 import { FlotaModule } from './flota/flota.module';
 import { PasajesModule } from './pasajes/pasajes.module';
 import { AuthModule } from './auth/auth.module';
@@ -9,12 +11,14 @@ import { ChoferModule } from './chofer/chofer.module';
 import { SecretariaModule } from './secretaria/secretaria.module';
 import { NotificacionesModule } from './notificaciones/notificaciones.module';
 import { SalidasModule } from './salidas/salidas.module';
+import { AuditoriaModule } from './auditoria/auditoria.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
     }),
+    ThrottlerModule.forRoot([{ ttl: 60000, limit: 100 }]),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -37,6 +41,13 @@ import { SalidasModule } from './salidas/salidas.module';
     SecretariaModule,
     NotificacionesModule,
     SalidasModule,
+    AuditoriaModule,
+  ],
+  providers: [
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
   ],
 })
 export class AppModule {}
